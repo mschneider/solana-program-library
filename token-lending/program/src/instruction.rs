@@ -49,7 +49,6 @@ pub enum LendingInstruction {
     },
 
     // TODO: Withdraw
-
     /// Borrow tokens from a reserve by depositing collateral tokens. The number of borrowed tokens
     /// is calculated by market price.
     ///
@@ -79,7 +78,6 @@ pub enum LendingInstruction {
     ///   2. `[]` Serum DEX market asks. Must be initialized and match dex market.
     ///   4. `[]` Clock sysvar
     SetPrice,
-
     // Repay,
     // Liquidate,
 }
@@ -165,15 +163,21 @@ impl LendingInstruction {
 }
 
 /// Creates an 'InitPool' instruction.
-pub fn init_pool(program_id: &Pubkey, pool_pubkey: &Pubkey) -> Result<Instruction, ProgramError> {
-    Ok(Instruction {
+pub fn init_pool(
+    program_id: &Pubkey,
+    pool_pubkey: &Pubkey,
+    quote_token_mint: &Pubkey,
+) -> Instruction {
+    Instruction {
         program_id: *program_id,
         accounts: vec![
             AccountMeta::new(*pool_pubkey, false),
+            AccountMeta::new_readonly(*quote_token_mint, false),
             AccountMeta::new_readonly(sysvar::rent::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
         ],
         data: LendingInstruction::InitPool.pack(),
-    })
+    }
 }
 
 /// Creates an 'InitReserve' instruction.
@@ -184,8 +188,9 @@ pub fn init_reserve(
     reserve_token_pubkey: &Pubkey,
     collateral_token_pubkey: &Pubkey,
     liquidity_token_mint_pubkey: &Pubkey,
-) -> Result<Instruction, ProgramError> {
-    Ok(Instruction {
+    market_pubkey: &Pubkey,
+) -> Instruction {
+    Instruction {
         program_id: *program_id,
         accounts: vec![
             AccountMeta::new(*reserve_pubkey, false),
@@ -193,11 +198,12 @@ pub fn init_reserve(
             AccountMeta::new_readonly(*reserve_token_pubkey, false),
             AccountMeta::new_readonly(*collateral_token_pubkey, false),
             AccountMeta::new_readonly(*liquidity_token_mint_pubkey, false),
+            AccountMeta::new_readonly(*market_pubkey, false),
             AccountMeta::new_readonly(sysvar::rent::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
         data: LendingInstruction::InitReserve.pack(),
-    })
+    }
 }
 
 /// Creates a 'Deposit' instruction.
@@ -210,8 +216,8 @@ pub fn deposit(
     base_reserve_token_pubkey: &Pubkey,
     liquidity_token_pubkey: &Pubkey,
     liquidity_token_mint_pubkey: &Pubkey,
-) -> Result<Instruction, ProgramError> {
-    Ok(Instruction {
+) -> Instruction {
+    Instruction {
         program_id: *program_id,
         accounts: vec![
             AccountMeta::new_readonly(*reserve_pubkey, false),
@@ -223,5 +229,5 @@ pub fn deposit(
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
         data: LendingInstruction::Deposit { amount }.pack(),
-    })
+    }
 }

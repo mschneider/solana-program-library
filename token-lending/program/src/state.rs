@@ -1,13 +1,13 @@
 //! State types
 
+use crate::error::LendingError;
 use arrayref::{array_mut_ref, array_ref, array_refs, mut_array_refs};
 use solana_program::{
-    sysvar::clock::Clock,
     program_error::ProgramError,
     program_pack::{IsInitialized, Pack, Sealed},
     pubkey::Pubkey,
+    sysvar::clock::Clock,
 };
-use crate::error::LendingError;
 
 /// Prices are only valid for a few slots before needing to be updated again
 const PRICE_EXPIRATION_SLOTS: u64 = 5;
@@ -99,8 +99,16 @@ impl Pack for ReserveInfo {
     fn unpack_from_slice(input: &[u8]) -> Result<Self, ProgramError> {
         let input = array_ref![input, 0, RESERVE_LEN];
         #[allow(clippy::ptr_offset_with_cast)]
-        let (is_initialized, pool, reserve, collateral, liquidity_token_mint, dex_market, market_price, market_price_updated_slot) =
-            array_refs![input, 1, 32, 32, 32, 32, 32, 8, 8];
+        let (
+            is_initialized,
+            pool,
+            reserve,
+            collateral,
+            liquidity_token_mint,
+            dex_market,
+            market_price,
+            market_price_updated_slot,
+        ) = array_refs![input, 1, 32, 32, 32, 32, 32, 8, 8];
         Ok(Self {
             is_initialized: match is_initialized {
                 [0] => false,
@@ -119,8 +127,16 @@ impl Pack for ReserveInfo {
 
     fn pack_into_slice(&self, output: &mut [u8]) {
         let output = array_mut_ref![output, 0, RESERVE_LEN];
-        let (is_initialized, pool, reserve, collateral, pool_mint, dex_market, market_price, market_price_updated_slot) =
-            mut_array_refs![output, 1, 32, 32, 32, 32, 32, 8, 8];
+        let (
+            is_initialized,
+            pool,
+            reserve,
+            collateral,
+            pool_mint,
+            dex_market,
+            market_price,
+            market_price_updated_slot,
+        ) = mut_array_refs![output, 1, 32, 32, 32, 32, 32, 8, 8];
         is_initialized[0] = self.is_initialized as u8;
         pool.copy_from_slice(self.pool.as_ref());
         reserve.copy_from_slice(self.reserve.as_ref());
@@ -159,7 +175,11 @@ impl Pack for PoolInfo {
             num_reserves: num_reserves[0],
             reserves: Box::new([Pubkey::new_from_array([0u8; 32]); MAX_RESERVES_USIZE]),
         };
-        for (src, dst) in reserves_flat.chunks(32).zip(pool.reserves.iter_mut()) {
+        for (src, dst) in reserves_flat
+            .chunks(32)
+            .zip(pool.reserves.iter_mut())
+            .take(pool.num_reserves as usize)
+        {
             *dst = Pubkey::new(src);
         }
         Ok(pool)

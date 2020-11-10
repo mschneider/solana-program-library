@@ -61,6 +61,12 @@ pub enum LendingError {
     /// Reserve price is expired
     #[error("Reserve price is expired")]
     ReservePriceExpired,
+    /// Token transfer failed
+    #[error("Token transfer failed")]
+    TokenTransferFailed,
+    /// Token mint to failed
+    #[error("Token mint to failed")]
+    TokenMintToFailed,
 }
 
 impl From<LendingError> for ProgramError {

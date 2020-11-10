@@ -5,7 +5,12 @@ use crate::{
     instruction::LendingInstruction,
     state::{ObligationInfo, PoolInfo, ReserveInfo, MAX_RESERVES},
 };
+use bytemuck::{Pod, Zeroable};
+use enumflags2::BitFlags;
 use num_traits::FromPrimitive;
+use safe_transmute::to_bytes::transmute_to_bytes;
+use serum_dex::critbit::{Slab, SlabView};
+use serum_dex::state::{strip_header, AccountFlag, MarketState};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     decode_error::DecodeError,
@@ -18,11 +23,6 @@ use solana_program::{
     pubkey::Pubkey,
     sysvar::{clock::Clock, rent::Rent, Sysvar},
 };
-use serum_dex::state::{MarketState, strip_header, AccountFlag};
-use serum_dex::critbit::{Slab,SlabView};
-use safe_transmute::to_bytes::transmute_to_bytes;
-use enumflags2::BitFlags;
-use bytemuck::{Pod, Zeroable};
 use std::cell::RefMut;
 
 /// Program state handler.
@@ -71,7 +71,7 @@ impl Processor {
         let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
         let token_program_id = next_account_info(account_info_iter)?;
 
-        let pool = PoolInfo::unpack_unchecked(&pool_info.data.borrow())?;
+        let mut pool = PoolInfo::unpack_unchecked(&pool_info.data.borrow())?;
         if pool.is_initialized() {
             return Err(LendingError::AlreadyInUse.into());
         }
@@ -84,12 +84,9 @@ impl Processor {
         }
         Self::unpack_mint(&quote_token_mint_info.data.borrow())?;
 
-        let info = PoolInfo {
-            is_initialized: true,
-            quote_token_mint: *quote_token_mint_info.key,
-            ..PoolInfo::default()
-        };
-        PoolInfo::pack(info, &mut pool_info.data.borrow_mut())?;
+        pool.is_initialized = true;
+        pool.quote_token_mint = *quote_token_mint_info.key;
+        PoolInfo::pack(pool, &mut pool_info.data.borrow_mut())?;
 
         Ok(())
     }
@@ -105,7 +102,7 @@ impl Processor {
         let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
         let token_program_id = next_account_info(account_info_iter)?;
 
-        let reserve = ReserveInfo::unpack_unchecked(&reserve_info.data.borrow())?;
+        let mut reserve = ReserveInfo::unpack_unchecked(&reserve_info.data.borrow())?;
         if reserve.is_initialized() {
             return Err(LendingError::AlreadyInUse.into());
         }
@@ -174,24 +171,36 @@ impl Processor {
         }
 
         // TODO: check that market state is owned by real serum dex program
-        let market = MarketState::load(dex_market_info, dex_market_info.owner)?;
-        if &pool.quote_token_mint.to_bytes()[..] != transmute_to_bytes(&market.pc_mint) {
+        fn base_mint_pubkey(data: &[u8]) -> Pubkey {
+            let count_start = 5 + 6 * 8;
+            let count_end = count_start + 32;
+            Pubkey::new(&data[count_start..count_end])
+        }
+
+        fn quote_mint_pubkey(data: &[u8]) -> Pubkey {
+            let count_start = 5 + 10 * 8;
+            let count_end = count_start + 32;
+            Pubkey::new(&data[count_start..count_end])
+        }
+
+        let market_base_mint = base_mint_pubkey(&dex_market_info.data.borrow());
+        let market_quote_mint = quote_mint_pubkey(&dex_market_info.data.borrow());
+        if pool.quote_token_mint != market_quote_mint {
+            info!(&market_quote_mint.to_string().as_str());
             return Err(LendingError::InvalidInput.into());
         }
-        if &reserve_token.mint.to_bytes()[..] != transmute_to_bytes(&market.coin_mint) {
+        if reserve_token.mint != market_base_mint {
+            info!(&market_base_mint.to_string().as_str());
             return Err(LendingError::InvalidInput.into());
         }
 
-        let info = ReserveInfo {
-            is_initialized: true,
-            pool: *pool_info.key,
-            reserve: *reserve_token_info.key,
-            collateral: *collateral_token_info.key,
-            liquidity_token_mint: *liquidity_token_mint_info.key,
-            dex_market: *dex_market_info.key,
-            ..ReserveInfo::default()
-        };
-        ReserveInfo::pack(info, &mut reserve_info.data.borrow_mut())?;
+        reserve.is_initialized = true;
+        reserve.pool = *pool_info.key;
+        reserve.reserve = *reserve_token_info.key;
+        reserve.collateral = *collateral_token_info.key;
+        reserve.liquidity_token_mint = *liquidity_token_mint_info.key;
+        reserve.dex_market = *dex_market_info.key;
+        ReserveInfo::pack(reserve, &mut reserve_info.data.borrow_mut())?;
 
         pool.reserves[pool.num_reserves as usize] = *reserve_info.key;
         pool.num_reserves = pool.num_reserves + 1;
@@ -340,9 +349,7 @@ impl Processor {
         Ok(())
     }
 
-    fn process_set_price(
-        accounts: &[AccountInfo],
-    ) -> ProgramResult {
+    fn process_set_price(accounts: &[AccountInfo]) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
         let reserve_info = next_account_info(account_info_iter)?;
         let dex_market_info = next_account_info(account_info_iter)?;
@@ -392,24 +399,20 @@ impl Processor {
                 Ok(RefMut::map(buf, Slab::new))
             }
         }
-    
+
         let mut bids = load_bids(dex_market_bids_info)?;
         let mut asks = load_asks(dex_market_asks_info)?;
 
-        let max_bid = bids.find_max().ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
-        let min_ask = asks.find_min().ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
+        let max_bid = bids
+            .find_max()
+            .ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
+        let min_ask = asks
+            .find_min()
+            .ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
 
-        let best_bid_ref = bids
-        .get_mut(max_bid)
-        .unwrap()
-        .as_leaf_mut()
-        .unwrap();
+        let best_bid_ref = bids.get_mut(max_bid).unwrap().as_leaf_mut().unwrap();
 
-        let best_ask_ref = asks
-        .get_mut(min_ask)
-        .unwrap()
-        .as_leaf_mut()
-        .unwrap();
+        let best_ask_ref = asks.get_mut(min_ask).unwrap().as_leaf_mut().unwrap();
 
         let best_bid: u64 = best_bid_ref.price().into();
         let best_ask: u64 = best_ask_ref.price().into();
@@ -457,7 +460,7 @@ impl Processor {
     }
 
     /// Issue a spl_token `Transfer` instruction.
-    fn token_transfer<'a, 'b>(params: TokenTransferParams<'a, 'b>) -> Result<(), ProgramError> {
+    fn token_transfer<'a, 'b>(params: TokenTransferParams<'a, 'b>) -> ProgramResult {
         let authorized_bytes = params.authorized.to_bytes();
         let authority_signer_seeds = [&authorized_bytes[..32], &[params.bump_seed]];
         let TokenTransferParams {
@@ -476,15 +479,21 @@ impl Processor {
             &[],
             amount,
         )?;
-        invoke_signed(
+        let result = invoke_signed(
             &ix,
             &[source, destination, authority, token_program],
             &[&authority_signer_seeds],
-        )
+        );
+        if let Err(err) = result {
+            err.print::<spl_token::error::TokenError>();
+            Err(LendingError::TokenTransferFailed.into())
+        } else {
+            Ok(())
+        }
     }
 
     /// Issue a spl_token `MintTo` instruction.
-    fn token_mint_to<'a, 'b>(params: TokenMintToParams<'a, 'b>) -> Result<(), ProgramError> {
+    fn token_mint_to<'a, 'b>(params: TokenMintToParams<'a, 'b>) -> ProgramResult {
         let authorized_bytes = params.authorized.to_bytes();
         let authority_signer_seeds = [&authorized_bytes[..32], &[params.bump_seed]];
         let TokenMintToParams {
@@ -503,11 +512,17 @@ impl Processor {
             &[],
             amount,
         )?;
-        invoke_signed(
+        let result = invoke_signed(
             &ix,
             &[mint, destination, authority, token_program],
             &[&authority_signer_seeds],
-        )
+        );
+        if let Err(err) = result {
+            err.print::<spl_token::error::TokenError>();
+            Err(LendingError::TokenMintToFailed.into())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -536,6 +551,6 @@ impl PrintProgramError for LendingError {
     where
         E: 'static + std::error::Error + DecodeError<E> + PrintProgramError + FromPrimitive,
     {
-        info!(self.to_string().as_str());
+        info!(&format!("{}: {}", <Self as DecodeError<E>>::type_of(), self.to_string()));
     }
 }
