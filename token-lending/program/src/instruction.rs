@@ -28,9 +28,9 @@ pub enum LendingInstruction {
     ///   2. `[]` Reserve token account. Must be non zero, owned by $authority.
     ///   3. `[]` Collateral token account. Must be empty, owned by $authority, minted by liquidity token mint.
     ///   4. `[]` Liquidity Token Mint. Must be empty, owned by $authority.
-    ///   5. `[]` Serum DEX market account. Must be initialized and match quote and base currency.
-    ///   6. `[]` Rent sysvar
-    ///   7. '[]` Token program id
+    ///   5. `[]` Rent sysvar
+    ///   6. '[]` Token program id
+    ///   7. `[optional]` Serum DEX market account. Not required for quote currency reserves. Must be initialized and match quote and base currency.
     InitReserve, // TODO: maintenance margin percent, borrow rate, & lend rate
 
     /// Deposit tokens into a reserve. The output is a liquidity token representing ownership
@@ -53,7 +53,7 @@ pub enum LendingInstruction {
     /// is calculated by market price.
     ///
     ///   0. `[]` Deposit reserve account.
-    ///   1. `[]` Withdraw reserve account.
+    ///   1. `[]` Borrow reserve account.
     ///   2. `[]` Authority derived from `create_program_address(&[pool account])`
     ///   3. `[writable]` collateral_token source account, $authority can transfer $amount,
     ///   4. `[writable]` Deposit Reserve - collateral account
@@ -163,16 +163,12 @@ impl LendingInstruction {
 }
 
 /// Creates an 'InitPool' instruction.
-pub fn init_pool(
-    program_id: &Pubkey,
-    pool_pubkey: &Pubkey,
-    quote_token_mint: &Pubkey,
-) -> Instruction {
+pub fn init_pool(program_id: Pubkey, pool_pubkey: Pubkey, quote_token_mint: Pubkey) -> Instruction {
     Instruction {
-        program_id: *program_id,
+        program_id,
         accounts: vec![
-            AccountMeta::new(*pool_pubkey, false),
-            AccountMeta::new_readonly(*quote_token_mint, false),
+            AccountMeta::new(pool_pubkey, false),
+            AccountMeta::new_readonly(quote_token_mint, false),
             AccountMeta::new_readonly(sysvar::rent::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
@@ -182,52 +178,119 @@ pub fn init_pool(
 
 /// Creates an 'InitReserve' instruction.
 pub fn init_reserve(
-    program_id: &Pubkey,
-    reserve_pubkey: &Pubkey,
-    pool_pubkey: &Pubkey,
-    reserve_token_pubkey: &Pubkey,
-    collateral_token_pubkey: &Pubkey,
-    liquidity_token_mint_pubkey: &Pubkey,
-    market_pubkey: &Pubkey,
+    program_id: Pubkey,
+    reserve_pubkey: Pubkey,
+    pool_pubkey: Pubkey,
+    reserve_token_pubkey: Pubkey,
+    collateral_token_pubkey: Pubkey,
+    liquidity_token_mint_pubkey: Pubkey,
+    market_pubkey: Option<Pubkey>,
 ) -> Instruction {
+    let mut accounts = vec![
+        AccountMeta::new(reserve_pubkey, false),
+        AccountMeta::new(pool_pubkey, false),
+        AccountMeta::new_readonly(reserve_token_pubkey, false),
+        AccountMeta::new_readonly(collateral_token_pubkey, false),
+        AccountMeta::new_readonly(liquidity_token_mint_pubkey, false),
+        AccountMeta::new_readonly(sysvar::rent::id(), false),
+        AccountMeta::new_readonly(spl_token::id(), false),
+    ];
+
+    if let Some(market_pubkey) = market_pubkey {
+        accounts.push(AccountMeta::new_readonly(market_pubkey, false));
+    }
+
     Instruction {
-        program_id: *program_id,
-        accounts: vec![
-            AccountMeta::new(*reserve_pubkey, false),
-            AccountMeta::new(*pool_pubkey, false),
-            AccountMeta::new_readonly(*reserve_token_pubkey, false),
-            AccountMeta::new_readonly(*collateral_token_pubkey, false),
-            AccountMeta::new_readonly(*liquidity_token_mint_pubkey, false),
-            AccountMeta::new_readonly(*market_pubkey, false),
-            AccountMeta::new_readonly(sysvar::rent::id(), false),
-            AccountMeta::new_readonly(spl_token::id(), false),
-        ],
+        program_id,
+        accounts,
         data: LendingInstruction::InitReserve.pack(),
     }
 }
 
 /// Creates a 'Deposit' instruction.
+#[allow(clippy::too_many_arguments)]
 pub fn deposit(
-    program_id: &Pubkey,
-    reserve_pubkey: &Pubkey,
-    authority_pubkey: &Pubkey,
+    program_id: Pubkey,
+    reserve_pubkey: Pubkey,
+    authority_pubkey: Pubkey,
     amount: u64,
-    reserve_token_pubkey: &Pubkey,
-    base_reserve_token_pubkey: &Pubkey,
-    liquidity_token_pubkey: &Pubkey,
-    liquidity_token_mint_pubkey: &Pubkey,
+    depositor_token_pubkey: Pubkey,
+    base_reserve_token_pubkey: Pubkey,
+    liquidity_token_pubkey: Pubkey,
+    liquidity_token_mint_pubkey: Pubkey,
 ) -> Instruction {
     Instruction {
-        program_id: *program_id,
+        program_id,
         accounts: vec![
-            AccountMeta::new_readonly(*reserve_pubkey, false),
-            AccountMeta::new_readonly(*authority_pubkey, false),
-            AccountMeta::new(*reserve_token_pubkey, false),
-            AccountMeta::new(*base_reserve_token_pubkey, false),
-            AccountMeta::new(*liquidity_token_pubkey, false),
-            AccountMeta::new(*liquidity_token_mint_pubkey, false),
+            AccountMeta::new_readonly(reserve_pubkey, false),
+            AccountMeta::new_readonly(authority_pubkey, false),
+            AccountMeta::new(depositor_token_pubkey, false),
+            AccountMeta::new(base_reserve_token_pubkey, false),
+            AccountMeta::new(liquidity_token_pubkey, false),
+            AccountMeta::new(liquidity_token_mint_pubkey, false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
         data: LendingInstruction::Deposit { amount }.pack(),
+    }
+}
+
+/// Creates a 'Borrow' instruction.
+#[allow(clippy::too_many_arguments)]
+pub fn borrow(
+    program_id: Pubkey,
+    deposit_reserve_pubkey: Pubkey,
+    borrow_reserve_pubkey: Pubkey,
+    authority_pubkey: Pubkey,
+    borrower_collateral_pubkey: Pubkey,
+    reserve_collateral_pubkey: Pubkey,
+    reserve_token_pubkey: Pubkey,
+    borrower_token_pubkey: Pubkey,
+    obligation_pubkey: Pubkey,
+    collateral_amount: u64,
+    obligation_authority: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(deposit_reserve_pubkey, false),
+            AccountMeta::new_readonly(borrow_reserve_pubkey, false),
+            AccountMeta::new_readonly(authority_pubkey, false),
+            AccountMeta::new(borrower_collateral_pubkey, false),
+            AccountMeta::new(reserve_collateral_pubkey, false),
+            AccountMeta::new(reserve_token_pubkey, false),
+            AccountMeta::new(borrower_token_pubkey, false),
+            AccountMeta::new(obligation_pubkey, false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
+            AccountMeta::new_readonly(sysvar::rent::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+        ],
+        data: LendingInstruction::Borrow {
+            collateral_amount,
+            obligation_authority,
+        }
+        .pack(),
+    }
+}
+
+/// Creates a `SetPrice` instruction
+pub fn set_price(
+    program_id: Pubkey,
+    reserve_pubkey: Pubkey,
+    dex_market_pubkey: Pubkey,
+    dex_market_bids_pubkey: Pubkey,
+    dex_market_asks_pubkey: Pubkey,
+    memory_pubkey: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(reserve_pubkey, false),
+            AccountMeta::new_readonly(dex_market_pubkey, false),
+            AccountMeta::new_readonly(dex_market_bids_pubkey, false),
+            AccountMeta::new_readonly(dex_market_asks_pubkey, false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
+            AccountMeta::new(memory_pubkey, false),
+        ],
+        data: LendingInstruction::SetPrice.pack(),
     }
 }

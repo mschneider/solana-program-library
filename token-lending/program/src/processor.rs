@@ -5,12 +5,9 @@ use crate::{
     instruction::LendingInstruction,
     state::{ObligationInfo, PoolInfo, ReserveInfo, MAX_RESERVES},
 };
-use bytemuck::{Pod, Zeroable};
-use enumflags2::BitFlags;
+use arrayref::{array_refs, mut_array_refs};
 use num_traits::FromPrimitive;
-use safe_transmute::to_bytes::transmute_to_bytes;
 use serum_dex::critbit::{Slab, SlabView};
-use serum_dex::state::{strip_header, AccountFlag, MarketState};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     decode_error::DecodeError,
@@ -98,7 +95,6 @@ impl Processor {
         let reserve_token_info = next_account_info(account_info_iter)?;
         let collateral_token_info = next_account_info(account_info_iter)?;
         let liquidity_token_mint_info = next_account_info(account_info_iter)?;
-        let dex_market_info = next_account_info(account_info_iter)?;
         let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
         let token_program_id = next_account_info(account_info_iter)?;
 
@@ -166,44 +162,51 @@ impl Processor {
             return Err(LendingError::InvalidFreezeAuthority.into());
         }
 
-        if !rent.is_exempt(dex_market_info.lamports(), dex_market_info.data_len()) {
-            return Err(LendingError::NotRentExempt.into());
-        }
+        let dex_market = if reserve_token.mint != pool.quote_token_mint {
+            let dex_market_info = next_account_info(account_info_iter)?;
+            if !rent.is_exempt(dex_market_info.lamports(), dex_market_info.data_len()) {
+                return Err(LendingError::NotRentExempt.into());
+            }
 
-        // TODO: check that market state is owned by real serum dex program
-        fn base_mint_pubkey(data: &[u8]) -> Pubkey {
-            let count_start = 5 + 6 * 8;
-            let count_end = count_start + 32;
-            Pubkey::new(&data[count_start..count_end])
-        }
+            // TODO: check that market state is owned by real serum dex program
+            fn base_mint_pubkey(data: &[u8]) -> Pubkey {
+                let count_start = 5 + 6 * 8;
+                let count_end = count_start + 32;
+                Pubkey::new(&data[count_start..count_end])
+            }
 
-        fn quote_mint_pubkey(data: &[u8]) -> Pubkey {
-            let count_start = 5 + 10 * 8;
-            let count_end = count_start + 32;
-            Pubkey::new(&data[count_start..count_end])
-        }
+            fn quote_mint_pubkey(data: &[u8]) -> Pubkey {
+                let count_start = 5 + 10 * 8;
+                let count_end = count_start + 32;
+                Pubkey::new(&data[count_start..count_end])
+            }
 
-        let market_base_mint = base_mint_pubkey(&dex_market_info.data.borrow());
-        let market_quote_mint = quote_mint_pubkey(&dex_market_info.data.borrow());
-        if pool.quote_token_mint != market_quote_mint {
-            info!(&market_quote_mint.to_string().as_str());
-            return Err(LendingError::InvalidInput.into());
-        }
-        if reserve_token.mint != market_base_mint {
-            info!(&market_base_mint.to_string().as_str());
-            return Err(LendingError::InvalidInput.into());
-        }
+            let market_base_mint = base_mint_pubkey(&dex_market_info.data.borrow());
+            let market_quote_mint = quote_mint_pubkey(&dex_market_info.data.borrow());
+            if pool.quote_token_mint != market_quote_mint {
+                info!(&market_quote_mint.to_string().as_str());
+                return Err(LendingError::InvalidInput.into());
+            }
+            if reserve_token.mint != market_base_mint {
+                info!(&market_base_mint.to_string().as_str());
+                return Err(LendingError::InvalidInput.into());
+            }
+
+            COption::Some(*dex_market_info.key)
+        } else {
+            COption::None
+        };
 
         reserve.is_initialized = true;
         reserve.pool = *pool_info.key;
         reserve.reserve = *reserve_token_info.key;
         reserve.collateral = *collateral_token_info.key;
         reserve.liquidity_token_mint = *liquidity_token_mint_info.key;
-        reserve.dex_market = *dex_market_info.key;
+        reserve.dex_market = dex_market;
         ReserveInfo::pack(reserve, &mut reserve_info.data.borrow_mut())?;
 
         pool.reserves[pool.num_reserves as usize] = *reserve_info.key;
-        pool.num_reserves = pool.num_reserves + 1;
+        pool.num_reserves += 1;
         PoolInfo::pack(pool, &mut pool_info.data.borrow_mut())?;
 
         Ok(())
@@ -301,7 +304,7 @@ impl Processor {
         if &withdraw_reserve.reserve != borrow_source_token_info.key {
             return Err(LendingError::InvalidInput.into());
         }
-        if deposit_reserve.liquidity_token_mint != deposit_reserve_liquidity_token.owner {
+        if deposit_reserve.liquidity_token_mint != deposit_reserve_liquidity_token.mint {
             return Err(LendingError::InvalidInput.into());
         }
 
@@ -310,7 +313,7 @@ impl Processor {
 
         Self::token_transfer(TokenTransferParams {
             source: collateral_source_token_info.clone(),
-            destination: deposit_reserve_info.clone(),
+            destination: collateral_destination_token_info.clone(),
             amount: collateral_amount,
             authority: authority_info.clone(),
             authorized: pool_key,
@@ -322,7 +325,18 @@ impl Processor {
         let deposit_token_price = deposit_reserve.current_market_price(clock)? as u128;
         let withdraw_token_price = withdraw_reserve.current_market_price(clock)? as u128;
         let deposit_value = collateral_amount as u128 * deposit_token_price;
+        info!(&format!(
+            "collateral token price: {}, withdraw token price: {}, collateral value: {}",
+            deposit_token_price, withdraw_token_price, deposit_value
+        ));
         let borrow_amount = (deposit_value / withdraw_token_price) as u64;
+        info!(&format!(
+            "swap {} collateral for {} tokens",
+            collateral_amount, borrow_amount
+        ));
+        let borrow_source_token =
+            Self::unpack_token_account(&borrow_source_token_info.data.borrow())?;
+        info!(&format!("source balance: {}", borrow_source_token.amount));
 
         Self::token_transfer(TokenTransferParams {
             source: borrow_source_token_info.clone(),
@@ -356,66 +370,79 @@ impl Processor {
         let dex_market_bids_info = next_account_info(account_info_iter)?;
         let dex_market_asks_info = next_account_info(account_info_iter)?;
         let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
+        let memory = next_account_info(account_info_iter)?;
 
         let mut reserve = ReserveInfo::unpack(&reserve_info.data.borrow())?;
-        if &reserve.dex_market != dex_market_info.key {
+        if reserve.dex_market != COption::Some(*dex_market_info.key) {
             return Err(LendingError::InvalidInput.into());
         }
 
-        let market = MarketState::load(dex_market_info, dex_market_info.owner)?;
-        if &dex_market_bids_info.key.to_bytes()[..] != transmute_to_bytes(&market.bids) {
+        fn load_bids_pubkey(data: &[u8]) -> Pubkey {
+            let count_start = 5 + 35 * 8;
+            let count_end = count_start + 32;
+            Pubkey::new(&data[count_start..count_end])
+        }
+
+        fn load_asks_pubkey(data: &[u8]) -> Pubkey {
+            let count_start = 5 + 39 * 8;
+            let count_end = count_start + 32;
+            Pubkey::new(&data[count_start..count_end])
+        }
+
+        let bids_pubkey = &load_bids_pubkey(&dex_market_info.data.borrow());
+        let asks_pubkey = &load_asks_pubkey(&dex_market_info.data.borrow());
+
+        if dex_market_bids_info.key != bids_pubkey {
             return Err(LendingError::InvalidInput.into());
         }
-        if &dex_market_asks_info.key.to_bytes()[..] != transmute_to_bytes(&market.asks) {
+        if dex_market_asks_info.key != asks_pubkey {
             return Err(LendingError::InvalidInput.into());
         }
 
-        #[derive(Copy, Clone)]
-        #[repr(C)]
-        struct OrderBookStateHeader {
-            account_flags: u64, // Initialized, (Bids or Asks)
+        enum Side {
+            Bid,
+            Ask,
         }
-        unsafe impl Zeroable for OrderBookStateHeader {}
-        unsafe impl Pod for OrderBookStateHeader {}
 
-        #[inline]
-        fn load_bids<'a>(bids: &'a AccountInfo) -> Result<RefMut<'a, Slab>, ProgramError> {
-            let (header, buf) = strip_header::<OrderBookStateHeader, u8>(bids, false)?;
-            let flags = BitFlags::from_bits(header.account_flags).unwrap();
-            if &flags != &(AccountFlag::Initialized | AccountFlag::Bids) {
-                Err(LendingError::InvalidInput.into())
-            } else {
-                Ok(RefMut::map(buf, Slab::new))
+        fn find_best_order(
+            orders: &AccountInfo,
+            memory: &AccountInfo,
+            side: Side,
+        ) -> Result<u64, ProgramError> {
+            let mut memory = memory.data.borrow_mut();
+            {
+                let bytes = orders.data.borrow();
+                let start = 5 + 8;
+                let end = bytes.len() - 7;
+                fast_copy(&bytes[start..end], &mut memory);
             }
-        }
 
-        #[inline]
-        fn load_asks<'a>(bids: &'a AccountInfo) -> Result<RefMut<'a, Slab>, ProgramError> {
-            let (header, buf) = strip_header::<OrderBookStateHeader, u8>(bids, false)?;
-            let flags = BitFlags::from_bits(header.account_flags).unwrap();
-            if &flags != &(AccountFlag::Initialized | AccountFlag::Asks) {
-                Err(LendingError::InvalidInput.into())
-            } else {
-                Ok(RefMut::map(buf, Slab::new))
+            let bytes = std::cell::RefCell::new(memory);
+            let mut order_slab = RefMut::map(bytes.borrow_mut(), |bytes| Slab::new(bytes));
+
+            let best_order = match side {
+                Side::Bid => order_slab.find_max(),
+                Side::Ask => order_slab.find_min(),
             }
+            .ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
+            let best_order_ref = order_slab
+                .get_mut(best_order)
+                .unwrap()
+                .as_leaf_mut()
+                .unwrap();
+            Ok(best_order_ref.price().into())
         }
 
-        let mut bids = load_bids(dex_market_bids_info)?;
-        let mut asks = load_asks(dex_market_asks_info)?;
+        let best_bid = find_best_order(dex_market_bids_info, memory, Side::Bid)?;
+        let best_ask = find_best_order(dex_market_asks_info, memory, Side::Ask)?;
 
-        let max_bid = bids
-            .find_max()
-            .ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
-        let min_ask = asks
-            .find_min()
-            .ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
-
-        let best_bid_ref = bids.get_mut(max_bid).unwrap().as_leaf_mut().unwrap();
-
-        let best_ask_ref = asks.get_mut(min_ask).unwrap().as_leaf_mut().unwrap();
-
-        let best_bid: u64 = best_bid_ref.price().into();
-        let best_ask: u64 = best_ask_ref.price().into();
+        info!(&format!(
+            "bid: {}, ask: {}, market: {}",
+            best_bid,
+            best_ask,
+            (best_bid + best_ask) / 2
+        ));
+        fast_set(&mut memory.data.borrow_mut(), 0);
 
         reserve.market_price = (best_bid + best_ask) / 2;
         reserve.market_price_updated_slot = clock.slot;
@@ -423,6 +450,7 @@ impl Processor {
 
         Ok(())
     }
+
     /// Generates seed bump for lending pool authorities
     fn find_authority_bump_seed(program_id: &Pubkey, my_info: &Pubkey) -> u8 {
         let (pubkey, bump_seed) =
@@ -460,7 +488,7 @@ impl Processor {
     }
 
     /// Issue a spl_token `Transfer` instruction.
-    fn token_transfer<'a, 'b>(params: TokenTransferParams<'a, 'b>) -> ProgramResult {
+    fn token_transfer(params: TokenTransferParams<'_, '_>) -> ProgramResult {
         let authorized_bytes = params.authorized.to_bytes();
         let authority_signer_seeds = [&authorized_bytes[..32], &[params.bump_seed]];
         let TokenTransferParams {
@@ -493,7 +521,7 @@ impl Processor {
     }
 
     /// Issue a spl_token `MintTo` instruction.
-    fn token_mint_to<'a, 'b>(params: TokenMintToParams<'a, 'b>) -> ProgramResult {
+    fn token_mint_to(params: TokenMintToParams<'_, '_>) -> ProgramResult {
         let authorized_bytes = params.authorized.to_bytes();
         let authority_signer_seeds = [&authorized_bytes[..32], &[params.bump_seed]];
         let TokenMintToParams {
@@ -551,6 +579,41 @@ impl PrintProgramError for LendingError {
     where
         E: 'static + std::error::Error + DecodeError<E> + PrintProgramError + FromPrimitive,
     {
-        info!(&format!("{}: {}", <Self as DecodeError<E>>::type_of(), self.to_string()));
+        info!(&format!(
+            "{}: {}",
+            <Self as DecodeError<E>>::type_of(),
+            self.to_string()
+        ));
+    }
+}
+
+/// A more efficient `copy_from_slice` implementation.
+fn fast_copy(mut src: &[u8], mut dst: &mut [u8]) {
+    const COPY_SIZE: usize = 512;
+    while src.len() >= COPY_SIZE {
+        #[allow(clippy::ptr_offset_with_cast)]
+        let (src_word, src_rem) = array_refs![src, COPY_SIZE; ..;];
+        #[allow(clippy::ptr_offset_with_cast)]
+        let (dst_word, dst_rem) = mut_array_refs![dst, COPY_SIZE; ..;];
+        *dst_word = *src_word;
+        src = src_rem;
+        dst = dst_rem;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), src.len());
+    }
+}
+
+/// A stack and instruction efficient memset
+fn fast_set(mut dst: &mut [u8], val: u8) {
+    const SET_SIZE: usize = 1024;
+    while dst.len() >= SET_SIZE {
+        #[allow(clippy::ptr_offset_with_cast)]
+        let (dst_word, dst_rem) = mut_array_refs![dst, SET_SIZE; ..;];
+        *dst_word = [val; SET_SIZE];
+        dst = dst_rem;
+    }
+    for i in dst {
+        *i = val
     }
 }

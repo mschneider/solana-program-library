@@ -4,6 +4,7 @@ use crate::error::LendingError;
 use arrayref::{array_mut_ref, array_ref, array_refs, mut_array_refs};
 use solana_program::{
     program_error::ProgramError,
+    program_option::COption,
     program_pack::{IsInitialized, Pack, Sealed},
     pubkey::Pubkey,
     sysvar::clock::Clock,
@@ -46,7 +47,7 @@ pub struct ReserveInfo {
     /// Liquidity tokens can be withdrawn back to the original reserve token.
     pub liquidity_token_mint: Pubkey,
     /// DEX market state account
-    pub dex_market: Pubkey,
+    pub dex_market: COption<Pubkey>,
     /// Latest market price
     pub market_price: u64,
     /// DEX market state account
@@ -56,7 +57,9 @@ pub struct ReserveInfo {
 impl ReserveInfo {
     /// Fetch the current market price
     pub fn current_market_price(&self, clock: &Clock) -> Result<u64, ProgramError> {
-        if self.market_price_updated_slot == 0 {
+        if self.dex_market.is_none() {
+            Ok(1) // TODO: need decimals
+        } else if self.market_price_updated_slot == 0 {
             Err(LendingError::ReservePriceUnset.into())
         } else if self.market_price_updated_slot + PRICE_EXPIRATION_SLOTS <= clock.slot {
             Err(LendingError::ReservePriceExpired.into())
@@ -91,9 +94,9 @@ impl IsInitialized for ReserveInfo {
     }
 }
 
-const RESERVE_LEN: usize = 177;
+const RESERVE_LEN: usize = 181;
 impl Pack for ReserveInfo {
-    const LEN: usize = 177;
+    const LEN: usize = 181;
 
     /// Unpacks a byte buffer into a [ReserveInfo](struct.ReserveInfo.html).
     fn unpack_from_slice(input: &[u8]) -> Result<Self, ProgramError> {
@@ -108,7 +111,7 @@ impl Pack for ReserveInfo {
             dex_market,
             market_price,
             market_price_updated_slot,
-        ) = array_refs![input, 1, 32, 32, 32, 32, 32, 8, 8];
+        ) = array_refs![input, 1, 32, 32, 32, 32, 36, 8, 8];
         Ok(Self {
             is_initialized: match is_initialized {
                 [0] => false,
@@ -119,7 +122,7 @@ impl Pack for ReserveInfo {
             reserve: Pubkey::new_from_array(*reserve),
             collateral: Pubkey::new_from_array(*collateral),
             liquidity_token_mint: Pubkey::new_from_array(*liquidity_token_mint),
-            dex_market: Pubkey::new_from_array(*dex_market),
+            dex_market: unpack_coption_key(dex_market)?,
             market_price: u64::from_le_bytes(*market_price),
             market_price_updated_slot: u64::from_le_bytes(*market_price_updated_slot),
         })
@@ -136,13 +139,13 @@ impl Pack for ReserveInfo {
             dex_market,
             market_price,
             market_price_updated_slot,
-        ) = mut_array_refs![output, 1, 32, 32, 32, 32, 32, 8, 8];
+        ) = mut_array_refs![output, 1, 32, 32, 32, 32, 36, 8, 8];
         is_initialized[0] = self.is_initialized as u8;
         pool.copy_from_slice(self.pool.as_ref());
         reserve.copy_from_slice(self.reserve.as_ref());
         collateral.copy_from_slice(self.collateral.as_ref());
         pool_mint.copy_from_slice(self.liquidity_token_mint.as_ref());
-        dex_market.copy_from_slice(self.dex_market.as_ref());
+        pack_coption_key(&self.dex_market, dex_market);
         *market_price = self.market_price.to_le_bytes();
         *market_price_updated_slot = self.market_price_updated_slot.to_le_bytes();
     }
@@ -187,6 +190,7 @@ impl Pack for PoolInfo {
 
     fn pack_into_slice(&self, output: &mut [u8]) {
         let output = array_mut_ref![output, 0, POOL_LEN];
+        #[allow(clippy::ptr_offset_with_cast)]
         let (is_initialized, quote_token_mint, num_reserves, reserves_flat) =
             mut_array_refs![output, 1, 32, 1, 32 * MAX_RESERVES_USIZE];
         *is_initialized = [self.is_initialized as u8];
@@ -249,5 +253,27 @@ impl Pack for ObligationInfo {
         collateral_reserve.copy_from_slice(self.collateral_reserve.as_ref());
         *borrow_amount = self.borrow_amount.to_le_bytes();
         borrow_reserve.copy_from_slice(self.borrow_reserve.as_ref());
+    }
+}
+
+// Helpers
+fn pack_coption_key(src: &COption<Pubkey>, dst: &mut [u8; 36]) {
+    let (tag, body) = mut_array_refs![dst, 4, 32];
+    match src {
+        COption::Some(key) => {
+            *tag = [1, 0, 0, 0];
+            body.copy_from_slice(key.as_ref());
+        }
+        COption::None => {
+            *tag = [0; 4];
+        }
+    }
+}
+fn unpack_coption_key(src: &[u8; 36]) -> Result<COption<Pubkey>, ProgramError> {
+    let (tag, body) = array_refs![src, 4, 32];
+    match *tag {
+        [0, 0, 0, 0] => Ok(COption::None),
+        [1, 0, 0, 0] => Ok(COption::Some(Pubkey::new_from_array(*body))),
+        _ => Err(ProgramError::InvalidAccountData),
     }
 }

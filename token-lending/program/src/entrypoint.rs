@@ -23,10 +23,10 @@ fn process_instruction(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::instruction::{deposit, init_pool, init_reserve};
-    use crate::state::{PoolInfo, ReserveInfo};
+    use crate::instruction::{borrow, deposit, init_pool, init_reserve, set_price};
+    use crate::state::{ObligationInfo, PoolInfo, ReserveInfo};
     use assert_matches::*;
-    use solana_program::program_pack::Pack;
+    use solana_program::{program_option::COption, program_pack::Pack};
     use solana_program_test::*;
     use solana_sdk::account::Account;
     use solana_sdk::signature::Keypair;
@@ -78,18 +78,20 @@ mod test {
         mint_pubkey: Pubkey,
         payer: &Keypair,
         authority: Option<Pubkey>,
+        native_amount: Option<u64>,
     ) -> Pubkey {
         let token_keypair = Keypair::new();
         let token_pubkey = token_keypair.pubkey();
         let authority_pubkey = authority.unwrap_or_else(|| payer.pubkey());
 
+        let lamports = 2039280 + native_amount.unwrap_or_default();
         let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
         let mut transaction = Transaction::new_with_payer(
             &[
                 create_account(
                     &payer.pubkey(),
                     &token_pubkey,
-                    2039280,
+                    lamports,
                     Token::LEN as u64,
                     &spl_token::id(),
                 ),
@@ -111,6 +113,33 @@ mod test {
         token_pubkey
     }
 
+    async fn mint_to(
+        banks_client: &mut BanksClient,
+        mint_pubkey: Pubkey,
+        payer: &Keypair,
+        account_pubkey: Pubkey,
+        authority: &Keypair,
+        amount: u64,
+    ) {
+        let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
+        let mut transaction = Transaction::new_with_payer(
+            &[spl_token::instruction::mint_to(
+                &spl_token::id(),
+                &mint_pubkey,
+                &account_pubkey,
+                &authority.pubkey(),
+                &[],
+                amount,
+            )
+            .unwrap()],
+            Some(&payer.pubkey()),
+        );
+
+        transaction.sign(&[payer, authority], recent_blockhash);
+
+        assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
+    }
+
     #[tokio::test]
     async fn test_transaction() {
         let program_id = Pubkey::new_unique();
@@ -126,13 +155,33 @@ mod test {
             market_pubkey,
             3591360,
             Pubkey::new(&[0; 32]),
-            "raw_sol_usdc_market",
+            "sol_usdc_dex_market.bin",
+        );
+
+        let market_bids_pubkey =
+            Pubkey::from_str("4VndUfHkmh6RWTQbXSVjY3wbSfqGjoPbuPHMoatV272H").unwrap();
+        test.add_account_with_file_data(
+            market_bids_pubkey,
+            457104960,
+            Pubkey::new(&[0; 32]),
+            "sol_usdc_dex_market_bids.bin",
+        );
+
+        let market_asks_pubkey =
+            Pubkey::from_str("6LTxKpMyGnbHM5rRx7f3eZHF9q3gnUBV5ucXF9LvrB3M").unwrap();
+        test.add_account_with_file_data(
+            market_asks_pubkey,
+            457104960,
+            Pubkey::new(&[0; 32]),
+            "sol_usdc_dex_market_asks.bin",
         );
 
         // Add USD Coin mint
+        let usdc_mint_authority = Keypair::new();
         let mut mint_buffer = [0u8; Mint::LEN];
         Mint {
             is_initialized: true,
+            mint_authority: COption::Some(usdc_mint_authority.pubkey()),
             ..Mint::default()
         }
         .pack_into_slice(&mut mint_buffer);
@@ -152,8 +201,6 @@ mod test {
 
         let (mut banks_client, payer, recent_blockhash) = test.start().await;
 
-        let quote_token_mint_pubkey = usdc_mint;
-
         let pool_keypair = Keypair::new();
         let pool_pubkey = pool_keypair.pubkey();
         let (authority_pubkey, _bump_seed) =
@@ -168,7 +215,7 @@ mod test {
                     PoolInfo::LEN as u64,
                     &program_id,
                 ),
-                init_pool(&program_id, &pool_pubkey, &quote_token_mint_pubkey),
+                init_pool(program_id, pool_pubkey, usdc_mint),
             ],
             Some(&payer.pubkey()),
         );
@@ -184,47 +231,82 @@ mod test {
             .unwrap();
         let pool_info = PoolInfo::unpack(&pool_account.data[..]).unwrap();
         assert_eq!(pool_info.is_initialized, true);
-        assert_eq!(pool_info.quote_token_mint, quote_token_mint_pubkey);
+        assert_eq!(pool_info.quote_token_mint, usdc_mint);
         assert_eq!(pool_info.num_reserves, 0);
         let zeroed = Pubkey::new(&[0; 32]);
         for reserve in &pool_info.reserves[..] {
             assert_eq!(reserve, &zeroed);
         }
 
-        let reserve_keypair = Keypair::new();
-        let reserve_pubkey = reserve_keypair.pubkey();
-
-        let reserve_token_mint_pubkey =
-            Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
-        let collateral_token_mint_pubkey =
+        let sol_reserve_keypair = Keypair::new();
+        let sol_reserve_pubkey = sol_reserve_keypair.pubkey();
+        let sol_collateral_token_mint_pubkey =
             create_mint_account(&mut banks_client, &payer, Some(authority_pubkey)).await;
 
-        let deposit_source_token_pubkey = create_token_account(
+        let usdc_reserve_keypair = Keypair::new();
+        let usdc_reserve_pubkey = usdc_reserve_keypair.pubkey();
+        let usdc_collateral_token_mint_pubkey =
+            create_mint_account(&mut banks_client, &payer, Some(authority_pubkey)).await;
+
+        let user_sol_token_pubkey = create_token_account(
             &mut banks_client,
-            reserve_token_mint_pubkey,
+            spl_token::native_mint::id(),
             &payer,
             Some(authority_pubkey),
+            Some(1000),
         )
         .await;
-        let reserve_token_pubkey = create_token_account(
+        let user_sol_collateral_token_pubkey = create_token_account(
             &mut banks_client,
-            reserve_token_mint_pubkey,
+            sol_collateral_token_mint_pubkey,
             &payer,
             Some(authority_pubkey),
+            None,
         )
         .await;
-        let reserve_collateral_token_pubkey = create_token_account(
+        let user_usdc_token_pubkey =
+            create_token_account(&mut banks_client, usdc_mint, &payer, None, None).await;
+
+        let sol_reserve_token_pubkey = create_token_account(
             &mut banks_client,
-            collateral_token_mint_pubkey,
+            spl_token::native_mint::id(),
             &payer,
             Some(authority_pubkey),
+            Some(1000),
         )
         .await;
-        let collateral_token_pubkey = create_token_account(
+        let sol_reserve_collateral_token_pubkey = create_token_account(
             &mut banks_client,
-            collateral_token_mint_pubkey,
+            sol_collateral_token_mint_pubkey,
             &payer,
             Some(authority_pubkey),
+            None,
+        )
+        .await;
+
+        let usdc_reserve_token_pubkey = create_token_account(
+            &mut banks_client,
+            usdc_mint,
+            &payer,
+            Some(authority_pubkey),
+            None,
+        )
+        .await;
+        mint_to(
+            &mut banks_client,
+            usdc_mint,
+            &payer,
+            usdc_reserve_token_pubkey,
+            &usdc_mint_authority,
+            2204 * 1000,
+        )
+        .await;
+        let usdc_reserve_collateral_token_pubkey = create_token_account(
+            &mut banks_client,
+            usdc_collateral_token_mint_pubkey,
+            &payer,
+            Some(authority_pubkey),
+            None,
         )
         .await;
 
@@ -232,25 +314,44 @@ mod test {
             &[
                 create_account(
                     &payer.pubkey(),
-                    &reserve_pubkey,
-                    2122800,
+                    &sol_reserve_pubkey,
+                    2150640,
                     ReserveInfo::LEN as u64,
                     &program_id,
                 ),
                 init_reserve(
+                    program_id,
+                    sol_reserve_pubkey,
+                    pool_pubkey,
+                    sol_reserve_token_pubkey,
+                    sol_reserve_collateral_token_pubkey,
+                    sol_collateral_token_mint_pubkey,
+                    Some(market_pubkey),
+                ),
+                create_account(
+                    &payer.pubkey(),
+                    &usdc_reserve_pubkey,
+                    2150640,
+                    ReserveInfo::LEN as u64,
                     &program_id,
-                    &reserve_pubkey,
-                    &pool_pubkey,
-                    &reserve_token_pubkey,
-                    &reserve_collateral_token_pubkey,
-                    &collateral_token_mint_pubkey,
-                    &market_pubkey,
+                ),
+                init_reserve(
+                    program_id,
+                    usdc_reserve_pubkey,
+                    pool_pubkey,
+                    usdc_reserve_token_pubkey,
+                    usdc_reserve_collateral_token_pubkey,
+                    usdc_collateral_token_mint_pubkey,
+                    None,
                 ),
             ],
             Some(&payer.pubkey()),
         );
 
-        transaction.sign(&[&payer, &reserve_keypair], recent_blockhash);
+        transaction.sign(
+            &[&payer, &sol_reserve_keypair, &usdc_reserve_keypair],
+            recent_blockhash,
+        );
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
 
@@ -262,48 +363,111 @@ mod test {
             .unwrap();
         let pool_info = PoolInfo::unpack(&pool_account.data[..]).unwrap();
         assert_eq!(pool_info.is_initialized, true);
-        assert_eq!(pool_info.quote_token_mint, quote_token_mint_pubkey);
-        assert_eq!(pool_info.num_reserves, 1);
+        assert_eq!(pool_info.quote_token_mint, usdc_mint);
+        assert_eq!(pool_info.num_reserves, 2);
+        assert_eq!(pool_info.reserves[0], sol_reserve_pubkey);
+        assert_eq!(pool_info.reserves[1], usdc_reserve_pubkey);
         let zeroed = Pubkey::new(&[0; 32]);
-        assert_eq!(pool_info.reserves[0], reserve_pubkey);
-        for reserve in &pool_info.reserves[1..] {
+        for reserve in &pool_info.reserves[2..] {
             assert_eq!(reserve, &zeroed);
         }
 
         // Verify reserve Account
         let reserve_account: Account = banks_client
-            .get_account(reserve_pubkey)
+            .get_account(sol_reserve_pubkey)
             .await
             .unwrap()
             .unwrap();
         let reserve_info = ReserveInfo::unpack(&reserve_account.data[..]).unwrap();
         assert_eq!(reserve_info.is_initialized, true);
         assert_eq!(reserve_info.pool, pool_pubkey);
-        assert_eq!(reserve_info.reserve, reserve_token_pubkey);
-        assert_eq!(reserve_info.collateral, reserve_collateral_token_pubkey);
+        assert_eq!(reserve_info.reserve, sol_reserve_token_pubkey);
+        assert_eq!(reserve_info.collateral, sol_reserve_collateral_token_pubkey);
         assert_eq!(
             reserve_info.liquidity_token_mint,
-            collateral_token_mint_pubkey
+            sol_collateral_token_mint_pubkey
         );
-        assert_eq!(reserve_info.dex_market, market_pubkey);
+        assert_eq!(reserve_info.dex_market, COption::Some(market_pubkey));
         assert_eq!(reserve_info.market_price, 0);
         assert_eq!(reserve_info.market_price_updated_slot, 0);
 
         let mut transaction = Transaction::new_with_payer(
             &[deposit(
-                &program_id,
-                &reserve_pubkey,
-                &authority_pubkey,
+                program_id,
+                sol_reserve_pubkey,
+                authority_pubkey,
                 1000,
-                &deposit_source_token_pubkey,
-                &reserve_token_pubkey,
-                &collateral_token_pubkey,
-                &collateral_token_mint_pubkey,
+                user_sol_token_pubkey,
+                sol_reserve_token_pubkey,
+                user_sol_collateral_token_pubkey,
+                sol_collateral_token_mint_pubkey,
             )],
             Some(&payer.pubkey()),
         );
 
         transaction.sign(&[&payer], recent_blockhash);
+
+        assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
+
+        let reserve_token_account: Account = banks_client
+            .get_account(sol_reserve_token_pubkey)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let reserve_token_info =
+            spl_token::state::Account::unpack(&reserve_token_account.data[..]).unwrap();
+        assert_eq!(reserve_token_info.amount, 2000);
+
+        let obligation_keypair = Keypair::new();
+        let obligation_pubkey = obligation_keypair.pubkey();
+        let memory_keypair = Keypair::new();
+        let memory_pubkey = memory_keypair.pubkey();
+        let mut transaction = Transaction::new_with_payer(
+            &[
+                create_account(
+                    &payer.pubkey(),
+                    &memory_pubkey,
+                    0,
+                    65528,
+                    &solana_program::system_program::id(),
+                ),
+                set_price(
+                    program_id,
+                    sol_reserve_pubkey,
+                    market_pubkey,
+                    market_bids_pubkey,
+                    market_asks_pubkey,
+                    memory_pubkey,
+                ),
+                create_account(
+                    &payer.pubkey(),
+                    &obligation_pubkey,
+                    17260801,
+                    ObligationInfo::LEN as u64,
+                    &program_id,
+                ),
+                borrow(
+                    program_id,
+                    sol_reserve_pubkey,
+                    usdc_reserve_pubkey,
+                    authority_pubkey,
+                    user_sol_collateral_token_pubkey,
+                    sol_reserve_collateral_token_pubkey,
+                    usdc_reserve_token_pubkey,
+                    user_usdc_token_pubkey,
+                    obligation_pubkey,
+                    1000,
+                    payer.pubkey(),
+                ),
+            ],
+            Some(&payer.pubkey()),
+        );
+
+        transaction.sign(
+            &[&payer, &memory_keypair, &obligation_keypair],
+            recent_blockhash,
+        );
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
     }
