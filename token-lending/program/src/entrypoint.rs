@@ -23,7 +23,7 @@ fn process_instruction(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::instruction::{borrow, deposit, init_pool, init_reserve, set_price};
+    use crate::instruction::{borrow, deposit, init_pool, init_reserve, repay, set_price};
     use crate::state::{ObligationInfo, PoolInfo, ReserveInfo};
     use assert_matches::*;
     use solana_program::{program_option::COption, program_pack::Pack};
@@ -150,6 +150,7 @@ mod test {
             processor!(process_instruction),
         );
 
+        let sol_market_price = 2204;
         let market_pubkey = Pubkey::new_unique();
         test.add_account_with_file_data(
             market_pubkey,
@@ -264,8 +265,14 @@ mod test {
             None,
         )
         .await;
-        let user_usdc_token_pubkey =
-            create_token_account(&mut banks_client, usdc_mint, &payer, None, None).await;
+        let user_usdc_token_pubkey = create_token_account(
+            &mut banks_client,
+            usdc_mint,
+            &payer,
+            Some(authority_pubkey),
+            None,
+        )
+        .await;
 
         let sol_reserve_token_pubkey = create_token_account(
             &mut banks_client,
@@ -298,7 +305,7 @@ mod test {
             &payer,
             usdc_reserve_token_pubkey,
             &usdc_mint_authority,
-            2204 * 1000,
+            1000 * sol_market_price,
         )
         .await;
         let usdc_reserve_collateral_token_pubkey = create_token_account(
@@ -315,7 +322,7 @@ mod test {
                 create_account(
                     &payer.pubkey(),
                     &sol_reserve_pubkey,
-                    2150640,
+                    2178480,
                     ReserveInfo::LEN as u64,
                     &program_id,
                 ),
@@ -327,11 +334,12 @@ mod test {
                     sol_reserve_collateral_token_pubkey,
                     sol_collateral_token_mint_pubkey,
                     Some(market_pubkey),
+                    1_000,
                 ),
                 create_account(
                     &payer.pubkey(),
                     &usdc_reserve_pubkey,
-                    2150640,
+                    2178480,
                     ReserveInfo::LEN as u64,
                     &program_id,
                 ),
@@ -343,6 +351,7 @@ mod test {
                     usdc_reserve_collateral_token_pubkey,
                     usdc_collateral_token_mint_pubkey,
                     None,
+                    10_000,
                 ),
             ],
             Some(&payer.pubkey()),
@@ -468,6 +477,27 @@ mod test {
             &[&payer, &memory_keypair, &obligation_keypair],
             recent_blockhash,
         );
+
+        assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
+
+        let mut transaction = Transaction::new_with_payer(
+            &[repay(
+                program_id,
+                usdc_reserve_pubkey,
+                sol_reserve_pubkey,
+                authority_pubkey,
+                user_usdc_token_pubkey,
+                usdc_reserve_token_pubkey,
+                sol_reserve_collateral_token_pubkey,
+                user_sol_collateral_token_pubkey,
+                2204000,
+                obligation_pubkey,
+                payer.pubkey(),
+            )],
+            Some(&payer.pubkey()),
+        );
+
+        transaction.sign(&[&payer], recent_blockhash);
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
     }

@@ -41,7 +41,7 @@ pub struct ReserveInfo {
     pub pool: Pubkey,
     /// Reserve token pool
     pub reserve: Pubkey,
-    /// Collateral token pool (liquidity tokens)
+    /// Collateral token pool (liquidity tokens tracked for interest calculation)
     pub collateral: Pubkey,
     /// Liquidity tokens are minted when reserve tokens are deposited.
     /// Liquidity tokens can be withdrawn back to the original reserve token.
@@ -52,6 +52,8 @@ pub struct ReserveInfo {
     pub market_price: u64,
     /// DEX market state account
     pub market_price_updated_slot: u64,
+    /// Borrow rate (over fixed denominator)
+    pub borrow_rate: u32,
 }
 
 impl ReserveInfo {
@@ -73,8 +75,8 @@ impl ReserveInfo {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ObligationInfo {
-    /// Slot when obligation was created. Used for calculating interest.
-    pub created_at_slot: u64,
+    /// Slot when obligation was updated. Used for calculating interest.
+    pub updated_at_slot: u64,
     /// Address that has the authority to repay this obligation
     pub authority: Pubkey,
     /// Amount of collateral tokens deposited for this obligation
@@ -94,9 +96,9 @@ impl IsInitialized for ReserveInfo {
     }
 }
 
-const RESERVE_LEN: usize = 181;
+const RESERVE_LEN: usize = 185;
 impl Pack for ReserveInfo {
-    const LEN: usize = 181;
+    const LEN: usize = 185;
 
     /// Unpacks a byte buffer into a [ReserveInfo](struct.ReserveInfo.html).
     fn unpack_from_slice(input: &[u8]) -> Result<Self, ProgramError> {
@@ -111,7 +113,8 @@ impl Pack for ReserveInfo {
             dex_market,
             market_price,
             market_price_updated_slot,
-        ) = array_refs![input, 1, 32, 32, 32, 32, 36, 8, 8];
+            borrow_rate,
+        ) = array_refs![input, 1, 32, 32, 32, 32, 36, 8, 8, 4];
         Ok(Self {
             is_initialized: match is_initialized {
                 [0] => false,
@@ -125,6 +128,7 @@ impl Pack for ReserveInfo {
             dex_market: unpack_coption_key(dex_market)?,
             market_price: u64::from_le_bytes(*market_price),
             market_price_updated_slot: u64::from_le_bytes(*market_price_updated_slot),
+            borrow_rate: u32::from_le_bytes(*borrow_rate),
         })
     }
 
@@ -139,7 +143,8 @@ impl Pack for ReserveInfo {
             dex_market,
             market_price,
             market_price_updated_slot,
-        ) = mut_array_refs![output, 1, 32, 32, 32, 32, 36, 8, 8];
+            borrow_rate,
+        ) = mut_array_refs![output, 1, 32, 32, 32, 32, 36, 8, 8, 4];
         is_initialized[0] = self.is_initialized as u8;
         pool.copy_from_slice(self.pool.as_ref());
         reserve.copy_from_slice(self.reserve.as_ref());
@@ -148,6 +153,7 @@ impl Pack for ReserveInfo {
         pack_coption_key(&self.dex_market, dex_market);
         *market_price = self.market_price.to_le_bytes();
         *market_price_updated_slot = self.market_price_updated_slot.to_le_bytes();
+        *borrow_rate = self.borrow_rate.to_le_bytes();
     }
 }
 
@@ -206,7 +212,7 @@ impl Pack for PoolInfo {
 impl Sealed for ObligationInfo {}
 impl IsInitialized for ObligationInfo {
     fn is_initialized(&self) -> bool {
-        self.created_at_slot > 0
+        self.updated_at_slot > 0
     }
 }
 
@@ -219,7 +225,7 @@ impl Pack for ObligationInfo {
         let input = array_ref![input, 0, OBLIGATION_LEN];
         #[allow(clippy::ptr_offset_with_cast)]
         let (
-            created_at_slot,
+            updated_at_slot,
             authority,
             collateral_amount,
             collateral_reserve,
@@ -227,7 +233,7 @@ impl Pack for ObligationInfo {
             borrow_reserve,
         ) = array_refs![input, 8, 32, 8, 32, 8, 32];
         Ok(Self {
-            created_at_slot: u64::from_le_bytes(*created_at_slot),
+            updated_at_slot: u64::from_le_bytes(*updated_at_slot),
             authority: Pubkey::new_from_array(*authority),
             collateral_amount: u64::from_le_bytes(*collateral_amount),
             collateral_reserve: Pubkey::new_from_array(*collateral_reserve),
@@ -239,7 +245,7 @@ impl Pack for ObligationInfo {
     fn pack_into_slice(&self, output: &mut [u8]) {
         let output = array_mut_ref![output, 0, OBLIGATION_LEN];
         let (
-            created_at_slot,
+            updated_at_slot,
             authority,
             collateral_amount,
             collateral_reserve,
@@ -247,7 +253,7 @@ impl Pack for ObligationInfo {
             borrow_reserve,
         ) = mut_array_refs![output, 8, 32, 8, 32, 8, 32];
 
-        *created_at_slot = self.created_at_slot.to_le_bytes();
+        *updated_at_slot = self.updated_at_slot.to_le_bytes();
         authority.copy_from_slice(self.authority.as_ref());
         *collateral_amount = self.collateral_amount.to_le_bytes();
         collateral_reserve.copy_from_slice(self.collateral_reserve.as_ref());

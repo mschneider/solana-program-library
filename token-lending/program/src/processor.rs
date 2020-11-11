@@ -10,6 +10,7 @@ use num_traits::FromPrimitive;
 use serum_dex::critbit::{Slab, SlabView};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
+    clock::{DEFAULT_TICKS_PER_SECOND, DEFAULT_TICKS_PER_SLOT, SECONDS_PER_DAY},
     decode_error::DecodeError,
     entrypoint::ProgramResult,
     info,
@@ -25,6 +26,15 @@ use std::cell::RefMut;
 /// Program state handler.
 pub struct Processor {}
 
+/// Max rate percentage
+pub const MAX_RATE_PERCENT: u32 = 1000;
+
+/// Max rate numerator
+pub const MAX_RATE_NUMERATOR: u32 = RATE_DENOMINATOR * MAX_RATE_PERCENT / 100;
+
+/// Fixed denominator for calculating rates
+pub const RATE_DENOMINATOR: u32 = 1_000_000;
+
 impl Processor {
     /// Processes an instruction
     pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> ProgramResult {
@@ -34,13 +44,17 @@ impl Processor {
                 info!("Instruction: Init Pool");
                 Self::process_init_pool(program_id, accounts)
             }
-            LendingInstruction::InitReserve => {
+            LendingInstruction::InitReserve { borrow_rate } => {
                 info!("Instruction: Init Reserve");
-                Self::process_init_reserve(program_id, accounts)
+                Self::process_init_reserve(program_id, accounts, borrow_rate)
             }
             LendingInstruction::Deposit { amount } => {
                 info!("Instruction: Deposit");
                 Self::process_deposit(program_id, amount, accounts)
+            }
+            LendingInstruction::Withdraw { amount } => {
+                info!("Instruction: Withdraw");
+                Self::process_withdraw(program_id, amount, accounts)
             }
             LendingInstruction::Borrow {
                 collateral_amount,
@@ -53,6 +67,10 @@ impl Processor {
                     obligation_authority,
                     accounts,
                 )
+            }
+            LendingInstruction::Repay { repay_amount } => {
+                info!("Instruction: Repay");
+                Self::process_repay(program_id, repay_amount, accounts)
             }
             LendingInstruction::SetPrice => {
                 info!("Instruction: Set price");
@@ -88,7 +106,11 @@ impl Processor {
         Ok(())
     }
 
-    fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    fn process_init_reserve(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        borrow_rate: u32,
+    ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
         let reserve_info = next_account_info(account_info_iter)?;
         let pool_info = next_account_info(account_info_iter)?;
@@ -104,6 +126,10 @@ impl Processor {
         }
         if !rent.is_exempt(reserve_info.lamports(), reserve_info.data_len()) {
             return Err(LendingError::NotRentExempt.into());
+        }
+
+        if borrow_rate > MAX_RATE_NUMERATOR {
+            return Err(LendingError::InvalidInput.into());
         }
 
         let mut pool = PoolInfo::unpack(&pool_info.data.borrow())?;
@@ -203,6 +229,7 @@ impl Processor {
         reserve.collateral = *collateral_token_info.key;
         reserve.liquidity_token_mint = *liquidity_token_mint_info.key;
         reserve.dex_market = dex_market;
+        reserve.borrow_rate = borrow_rate;
         ReserveInfo::pack(reserve, &mut reserve_info.data.borrow_mut())?;
 
         pool.reserves[pool.num_reserves as usize] = *reserve_info.key;
@@ -267,6 +294,61 @@ impl Processor {
         Ok(())
     }
 
+    fn process_withdraw(
+        program_id: &Pubkey,
+        amount: u64,
+        accounts: &[AccountInfo],
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let reserve_info = next_account_info(account_info_iter)?;
+        let authority_info = next_account_info(account_info_iter)?;
+        let collateral_token_info = next_account_info(account_info_iter)?;
+        let reserve_token_info = next_account_info(account_info_iter)?;
+        let withdrawer_token_info = next_account_info(account_info_iter)?;
+        let liquidity_token_mint_info = next_account_info(account_info_iter)?;
+        let token_program_id = next_account_info(account_info_iter)?;
+
+        let reserve = ReserveInfo::unpack(&reserve_info.data.borrow())?;
+        let bump_seed = Self::find_authority_bump_seed(program_id, &reserve.pool);
+        if authority_info.key != &Self::authority_id(program_id, &reserve.pool, bump_seed)? {
+            return Err(LendingError::InvalidProgramAddress.into());
+        }
+
+        if reserve_token_info.key != &reserve.reserve
+            || liquidity_token_mint_info.key != &reserve.liquidity_token_mint
+        {
+            return Err(LendingError::InvalidInput.into());
+        }
+        if reserve_token_info.key == withdrawer_token_info.key {
+            return Err(LendingError::InvalidInput.into());
+        }
+        if collateral_token_info.key == &reserve.collateral {
+            return Err(LendingError::InvalidInput.into());
+        }
+
+        Self::token_transfer(TokenTransferParams {
+            source: reserve_token_info.clone(),
+            destination: withdrawer_token_info.clone(),
+            amount,
+            authority: authority_info.clone(),
+            authorized: &reserve.pool,
+            bump_seed,
+            token_program: token_program_id.clone(),
+        })?;
+
+        Self::token_burn(TokenBurnParams {
+            mint: liquidity_token_mint_info.clone(),
+            source: collateral_token_info.clone(),
+            amount,
+            authority: authority_info.clone(),
+            authorized: &reserve.pool,
+            bump_seed,
+            token_program: token_program_id.clone(),
+        })?;
+
+        Ok(())
+    }
+
     fn process_borrow(
         program_id: &Pubkey,
         collateral_amount: u64,
@@ -321,22 +403,16 @@ impl Processor {
             token_program: token_program_id.clone(),
         })?;
 
-        // TODO improve math
+        // TODO: math
         let deposit_token_price = deposit_reserve.current_market_price(clock)? as u128;
         let withdraw_token_price = withdraw_reserve.current_market_price(clock)? as u128;
         let deposit_value = collateral_amount as u128 * deposit_token_price;
-        info!(&format!(
-            "collateral token price: {}, withdraw token price: {}, collateral value: {}",
-            deposit_token_price, withdraw_token_price, deposit_value
-        ));
         let borrow_amount = (deposit_value / withdraw_token_price) as u64;
         info!(&format!(
-            "swap {} collateral for {} tokens",
+            "collateral token price: {}, withdraw token price: {}, collateral value: {}, collateral_amount: {}, borrow_amount: {}",
+            deposit_token_price, withdraw_token_price, deposit_value,
             collateral_amount, borrow_amount
         ));
-        let borrow_source_token =
-            Self::unpack_token_account(&borrow_source_token_info.data.borrow())?;
-        info!(&format!("source balance: {}", borrow_source_token.amount));
 
         Self::token_transfer(TokenTransferParams {
             source: borrow_source_token_info.clone(),
@@ -350,7 +426,7 @@ impl Processor {
 
         ObligationInfo::pack(
             ObligationInfo {
-                created_at_slot: clock.slot,
+                updated_at_slot: clock.slot,
                 authority: obligation_authority,
                 collateral_amount,
                 collateral_reserve: *deposit_reserve_info.key,
@@ -359,6 +435,108 @@ impl Processor {
             },
             &mut obligation_info.data.borrow_mut(),
         )?;
+
+        Ok(())
+    }
+
+    #[inline(never)] // avoid stack frame limit
+    fn process_repay(
+        program_id: &Pubkey,
+        repay_amount: u64,
+        accounts: &[AccountInfo],
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let deposit_reserve_info = next_account_info(account_info_iter)?;
+        let collateral_reserve_info = next_account_info(account_info_iter)?;
+        let authority_info = next_account_info(account_info_iter)?;
+        let repayer_token_info = next_account_info(account_info_iter)?;
+        let reserve_token_info = next_account_info(account_info_iter)?;
+        let reserve_collateral_token_info = next_account_info(account_info_iter)?;
+        let repayer_collateral_token_info = next_account_info(account_info_iter)?;
+        let obligation_info = next_account_info(account_info_iter)?;
+        let obligation_authority = next_account_info(account_info_iter)?;
+        let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
+        let token_program_id = next_account_info(account_info_iter)?;
+
+        let mut obligation = ObligationInfo::unpack(&obligation_info.data.borrow())?;
+        if !obligation_authority.is_signer || &obligation.authority != obligation_authority.key {
+            return Err(LendingError::InvalidInput.into());
+        }
+        if &obligation.borrow_reserve != deposit_reserve_info.key {
+            return Err(LendingError::InvalidInput.into());
+        }
+        if &obligation.collateral_reserve != collateral_reserve_info.key {
+            return Err(LendingError::InvalidInput.into());
+        }
+
+        let deposit_reserve = ReserveInfo::unpack(&deposit_reserve_info.data.borrow())?;
+        let collateral_reserve = ReserveInfo::unpack(&collateral_reserve_info.data.borrow())?;
+        if deposit_reserve.pool != collateral_reserve.pool {
+            return Err(LendingError::PoolMismatch.into());
+        }
+        if &deposit_reserve.reserve != reserve_token_info.key {
+            return Err(LendingError::InvalidInput.into());
+        }
+        if &collateral_reserve.collateral != reserve_collateral_token_info.key {
+            return Err(LendingError::InvalidInput.into());
+        }
+
+        let reserve_liquidity_token =
+            Self::unpack_token_account(&reserve_collateral_token_info.data.borrow())?;
+        if collateral_reserve.liquidity_token_mint != reserve_liquidity_token.mint {
+            return Err(LendingError::InvalidInput.into());
+        }
+
+        let pool_key = &deposit_reserve.pool;
+        let bump_seed = Self::find_authority_bump_seed(program_id, pool_key);
+
+        // TODO: math
+        let slots_elapsed = clock.slot - obligation.updated_at_slot;
+        let slots_per_year =
+            DEFAULT_TICKS_PER_SECOND / DEFAULT_TICKS_PER_SLOT * SECONDS_PER_DAY * 365;
+        let yearly_interest =
+            obligation.borrow_amount * deposit_reserve.borrow_rate as u64 / RATE_DENOMINATOR as u64;
+        let accrued_interest = slots_elapsed * yearly_interest / slots_per_year;
+        let borrow_balance = obligation.borrow_amount + accrued_interest;
+        let repay_amount = repay_amount.min(borrow_balance);
+        let collateral_withdraw_amount = if repay_amount == borrow_balance {
+            obligation.collateral_amount
+        } else if repay_amount == 0 {
+            0
+        } else {
+            obligation.collateral_amount * repay_amount / borrow_balance
+        };
+
+        info!(&format!(
+            "slots_elapsed {} slots_per_year {} yearly_interest {} accrued_interest: {}, borrow_balance: {}, repay_amount: {} collateral amount: {}, withdraw amount: {}",
+            slots_elapsed, slots_per_year, yearly_interest, accrued_interest, borrow_balance, repay_amount,
+            obligation.collateral_amount, collateral_withdraw_amount
+        ));
+
+        Self::token_transfer(TokenTransferParams {
+            source: repayer_token_info.clone(),
+            destination: reserve_token_info.clone(),
+            amount: repay_amount,
+            authority: authority_info.clone(),
+            authorized: pool_key,
+            bump_seed,
+            token_program: token_program_id.clone(),
+        })?;
+
+        Self::token_transfer(TokenTransferParams {
+            source: reserve_collateral_token_info.clone(),
+            destination: repayer_collateral_token_info.clone(),
+            amount: collateral_withdraw_amount,
+            authority: authority_info.clone(),
+            authorized: pool_key,
+            bump_seed,
+            token_program: token_program_id.clone(),
+        })?;
+
+        obligation.updated_at_slot = clock.slot;
+        obligation.borrow_amount -= repay_amount;
+        obligation.collateral_amount -= collateral_withdraw_amount;
+        ObligationInfo::pack(obligation, &mut obligation_info.data.borrow_mut())?;
 
         Ok(())
     }
@@ -552,6 +730,39 @@ impl Processor {
             Ok(())
         }
     }
+
+    /// Issue a spl_token `Burn` instruction.
+    fn token_burn(params: TokenBurnParams<'_, '_>) -> ProgramResult {
+        let authorized_bytes = params.authorized.to_bytes();
+        let authority_signer_seeds = [&authorized_bytes[..32], &[params.bump_seed]];
+        let TokenBurnParams {
+            mint,
+            source,
+            authority,
+            token_program,
+            amount,
+            ..
+        } = params;
+        let ix = spl_token::instruction::burn(
+            token_program.key,
+            source.key,
+            mint.key,
+            authority.key,
+            &[],
+            amount,
+        )?;
+        let result = invoke_signed(
+            &ix,
+            &[source, mint, authority, token_program],
+            &[&authority_signer_seeds],
+        );
+        if let Err(err) = result {
+            err.print::<spl_token::error::TokenError>();
+            Err(LendingError::TokenBurnFailed.into())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 struct TokenTransferParams<'a: 'b, 'b> {
@@ -567,6 +778,16 @@ struct TokenTransferParams<'a: 'b, 'b> {
 struct TokenMintToParams<'a: 'b, 'b> {
     mint: AccountInfo<'a>,
     destination: AccountInfo<'a>,
+    amount: u64,
+    authority: AccountInfo<'a>,
+    authorized: &'b Pubkey,
+    bump_seed: u8,
+    token_program: AccountInfo<'a>,
+}
+
+struct TokenBurnParams<'a: 'b, 'b> {
+    mint: AccountInfo<'a>,
+    source: AccountInfo<'a>,
     amount: u64,
     authority: AccountInfo<'a>,
     authorized: &'b Pubkey,

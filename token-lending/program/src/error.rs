@@ -67,6 +67,9 @@ pub enum LendingError {
     /// Token mint to failed
     #[error("Token mint to failed")]
     TokenMintToFailed,
+    /// Token burn failed
+    #[error("Token burn failed")]
+    TokenBurnFailed,
 }
 
 impl From<LendingError> for ProgramError {
