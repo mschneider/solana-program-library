@@ -39,9 +39,6 @@ impl Processor {
         }
 
         if !rent.is_exempt(mint_info.lamports(), mint_data_len) {
-            let mut msg = "minimum balance: ".to_string();
-            msg.push_str(&rent.minimum_balance(mint_data_len).to_string());
-            info!(msg.as_str());
             return Err(TokenError::NotRentExempt.into());
         }
 
@@ -70,9 +67,6 @@ impl Processor {
         }
 
         if !rent.is_exempt(new_account_info.lamports(), new_account_info_data_len) {
-            let mut msg = "minimum balance: ".to_string();
-            msg.push_str(&rent.minimum_balance(new_account_info_data_len).to_string());
-            info!(msg.as_str());
             return Err(TokenError::NotRentExempt.into());
         }
 
