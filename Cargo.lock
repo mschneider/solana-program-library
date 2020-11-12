@@ -3063,6 +3063,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-program-test"
+version = "1.4.7"
+source = "git+https://github.com/jstarry/solana?rev=80fb74e05#80fb74e05817776cad27fec2128f4761630e245e"
+dependencies = [
+ "async-trait",
+ "base64 0.12.3",
+ "chrono",
+ "chrono-humanize",
+ "log",
+ "solana-banks-client",
+ "solana-banks-server",
+ "solana-bpf-loader-program",
+ "solana-logger",
+ "solana-program",
+ "solana-runtime",
+ "solana-sdk",
+ "tokio 0.3.3",
+]
+
+[[package]]
 name = "solana-rayon-threadlimit"
 version = "1.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3327,7 +3347,7 @@ name = "spl-associated-token-account"
 version = "1.0.1"
 dependencies = [
  "solana-program",
- "solana-program-test",
+ "solana-program-test 1.4.6",
  "solana-sdk",
  "spl-token 3.0.0",
  "tokio 0.3.3",
@@ -3516,12 +3536,13 @@ dependencies = [
  "bs58",
  "bytemuck",
  "enumflags2",
+ "log",
  "num-derive",
  "num-traits",
  "safe-transmute",
  "serum_dex",
  "solana-program",
- "solana-program-test",
+ "solana-program-test 1.4.7",
  "solana-sdk",
  "spl-token 3.0.0",
  "thiserror",

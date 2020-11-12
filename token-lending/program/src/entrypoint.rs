@@ -200,7 +200,9 @@ mod test {
             processor!(spl_token::processor::Processor::process),
         );
 
-        let (mut banks_client, payer, recent_blockhash) = test.start().await;
+        test.set_bpf_compute_max_units(3000000);
+
+        let (mut banks_client, payer, recent_blockhash, bank_forks) = test.start().await;
 
         let pool_keypair = Keypair::new();
         let pool_pubkey = pool_keypair.pubkey();
@@ -322,7 +324,7 @@ mod test {
                 create_account(
                     &payer.pubkey(),
                     &sol_reserve_pubkey,
-                    2178480,
+                    2429040,
                     ReserveInfo::LEN as u64,
                     &program_id,
                 ),
@@ -334,12 +336,11 @@ mod test {
                     sol_reserve_collateral_token_pubkey,
                     sol_collateral_token_mint_pubkey,
                     Some(market_pubkey),
-                    1_000,
                 ),
                 create_account(
                     &payer.pubkey(),
                     &usdc_reserve_pubkey,
-                    2178480,
+                    2429040,
                     ReserveInfo::LEN as u64,
                     &program_id,
                 ),
@@ -351,7 +352,6 @@ mod test {
                     usdc_reserve_collateral_token_pubkey,
                     usdc_collateral_token_mint_pubkey,
                     None,
-                    10_000,
                 ),
             ],
             Some(&payer.pubkey()),
@@ -479,6 +479,13 @@ mod test {
         );
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
+
+        // {
+        //     let bank = bank_forks.write().unwrap().working_bank();
+        //     bank.get_sy
+        //     bank.store_account(clock::id(), solana_sdk::account::create_account(
+        //         clock, lamports))
+        // }
 
         let mut transaction = Transaction::new_with_payer(
             &[repay(

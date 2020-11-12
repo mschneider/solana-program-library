@@ -28,18 +28,16 @@ pub enum LendingInstruction {
     ///   2. `[]` Reserve token account. Must be non zero, owned by $authority.
     ///   3. `[]` Collateral token account. Must be empty, owned by $authority, minted by liquidity token mint.
     ///   4. `[]` Liquidity Token Mint. Must be empty, owned by $authority.
-    ///   5. `[]` Rent sysvar
-    ///   6. '[]` Token program id
-    ///   7. `[optional]` Serum DEX market account. Not required for quote currency reserves. Must be initialized and match quote and base currency.
-    InitReserve {
-        /// Borrow rate for the reserve
-        borrow_rate: u32, // over fixed denominator 1,000,000 (max: 10,000,000 for 1000%, min: 1 for 0.0001%)
-    }, // TODO: maintenance margin percent
+    ///   5. `[]` Clock sysvar
+    ///   6. `[]` Rent sysvar
+    ///   7. '[]` Token program id
+    ///   8. `[optional]` Serum DEX market account. Not required for quote currency reserves. Must be initialized and match quote and base currency.
+    InitReserve, // TODO: maintenance margin percent, interest rate strategy
 
     /// Deposit tokens into a reserve. The output is a liquidity token representing ownership
     /// of the reserve liquidity pool.
     ///
-    ///   0. `[]` Reserve account.
+    ///   0. `[writable]` Reserve account.
     ///   1. `[]` Authority derived from `create_program_address(&[Pool account])`
     ///   2. `[writable]` reserve_token account, $authority can transfer $amount,
     ///   3. `[writable]` reserve_token Base account, specified by $reserve_account,
@@ -54,7 +52,7 @@ pub enum LendingInstruction {
     /// Withdraw tokens from a reserve. The input is a liquidity token representing ownership
     /// of the reserve liquidity pool.
     ///
-    ///   0. `[]` Reserve account.
+    ///   0. `[writable]` Reserve account.
     ///   1. `[]` Authority derived from `create_program_address(&[Pool account])`
     ///   2. `[writable]` collateral_token account, $authority can transfer $amount,
     ///   3. `[writable]` reserve_token Base account, specified by $reserve_account,
@@ -69,8 +67,8 @@ pub enum LendingInstruction {
     /// Borrow tokens from a reserve by depositing collateral tokens. The number of borrowed tokens
     /// is calculated by market price.
     ///
-    ///   0. `[]` Deposit reserve account.
-    ///   1. `[]` Borrow reserve account.
+    ///   0. `[writable]` Deposit reserve account.
+    ///   1. `[writable]` Borrow reserve account.
     ///   2. `[]` Authority derived from `create_program_address(&[pool account])`
     ///   3. `[writable]` collateral_token source account, $authority can transfer $collateral_amount,
     ///   4. `[writable]` Deposit Reserve - collateral account
@@ -92,8 +90,8 @@ pub enum LendingInstruction {
     ///
     /// TODO: Make it easy to calculate borrow balance
     ///
-    ///   0. `[]` Deposit (borrow balance) reserve account.
-    ///   1. `[]` Receive (collateral) reserve account, $authority can transfer $amount
+    ///   0. `[writable]` Deposit (borrow balance) reserve account.
+    ///   1. `[writable]` Receive (collateral) reserve account, $authority can transfer $amount
     ///   2. `[]` Authority derived from `create_program_address(&[pool account])`
     ///   3. `[writable]` repay token account
     ///   4. `[writable]` Deposit Reserve - token account
@@ -108,7 +106,7 @@ pub enum LendingInstruction {
         repay_amount: u64,
     },
 
-    // Liquidate,
+    // Liquidate
     /// Set the market price of a reserve pool from DEX market accounts.
     ///
     ///   0. `[writable]` Reserve account.
@@ -127,10 +125,7 @@ impl LendingInstruction {
             .ok_or(LendingError::InvalidInstruction)?;
         Ok(match tag {
             0 => Self::InitPool,
-            1 => {
-                let (borrow_rate, _rest) = Self::unpack_u32(rest)?;
-                Self::InitReserve { borrow_rate }
-            }
+            1 => Self::InitReserve,
             2 => {
                 let (amount, _rest) = Self::unpack_u64(rest)?;
                 Self::Deposit { amount }
@@ -154,20 +149,6 @@ impl LendingInstruction {
             6 => Self::SetPrice,
             _ => return Err(LendingError::InvalidInstruction.into()),
         })
-    }
-
-    fn unpack_u32(input: &[u8]) -> Result<(u32, &[u8]), ProgramError> {
-        if input.len() >= 4 {
-            let (amount, rest) = input.split_at(4);
-            let amount = amount
-                .get(..4)
-                .and_then(|slice| slice.try_into().ok())
-                .map(u32::from_le_bytes)
-                .ok_or(LendingError::InvalidInstruction)?;
-            Ok((amount, rest))
-        } else {
-            Err(LendingError::InvalidInstruction.into())
-        }
     }
 
     fn unpack_u64(input: &[u8]) -> Result<(u64, &[u8]), ProgramError> {
@@ -201,9 +182,8 @@ impl LendingInstruction {
             Self::InitPool => {
                 buf.push(0);
             }
-            Self::InitReserve { borrow_rate } => {
+            Self::InitReserve => {
                 buf.push(1);
-                buf.extend_from_slice(&borrow_rate.to_le_bytes());
             }
             Self::Deposit { amount } => {
                 buf.push(2);
@@ -257,7 +237,6 @@ pub fn init_reserve(
     collateral_token_pubkey: Pubkey,
     liquidity_token_mint_pubkey: Pubkey,
     market_pubkey: Option<Pubkey>,
-    borrow_rate: u32,
 ) -> Instruction {
     let mut accounts = vec![
         AccountMeta::new(reserve_pubkey, false),
@@ -265,6 +244,7 @@ pub fn init_reserve(
         AccountMeta::new_readonly(reserve_token_pubkey, false),
         AccountMeta::new_readonly(collateral_token_pubkey, false),
         AccountMeta::new_readonly(liquidity_token_mint_pubkey, false),
+        AccountMeta::new_readonly(sysvar::clock::id(), false),
         AccountMeta::new_readonly(sysvar::rent::id(), false),
         AccountMeta::new_readonly(spl_token::id(), false),
     ];
@@ -276,7 +256,7 @@ pub fn init_reserve(
     Instruction {
         program_id,
         accounts,
-        data: LendingInstruction::InitReserve { borrow_rate }.pack(),
+        data: LendingInstruction::InitReserve.pack(),
     }
 }
 
@@ -295,7 +275,7 @@ pub fn deposit(
     Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(reserve_pubkey, false),
+            AccountMeta::new(reserve_pubkey, false),
             AccountMeta::new_readonly(authority_pubkey, false),
             AccountMeta::new(depositor_token_pubkey, false),
             AccountMeta::new(base_reserve_token_pubkey, false),
@@ -322,12 +302,13 @@ pub fn withdraw(
     Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(reserve_pubkey, false),
+            AccountMeta::new(reserve_pubkey, false),
             AccountMeta::new_readonly(authority_pubkey, false),
             AccountMeta::new(collateral_token_pubkey, false),
             AccountMeta::new(base_reserve_token_pubkey, false),
             AccountMeta::new(withdrawer_token_pubkey, false),
             AccountMeta::new(liquidity_token_mint_pubkey, false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
         data: LendingInstruction::Withdraw { amount }.pack(),
@@ -352,8 +333,8 @@ pub fn borrow(
     Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(deposit_reserve_pubkey, false),
-            AccountMeta::new_readonly(borrow_reserve_pubkey, false),
+            AccountMeta::new(deposit_reserve_pubkey, false),
+            AccountMeta::new(borrow_reserve_pubkey, false),
             AccountMeta::new_readonly(authority_pubkey, false),
             AccountMeta::new(borrower_collateral_pubkey, false),
             AccountMeta::new(reserve_collateral_pubkey, false),
@@ -390,8 +371,8 @@ pub fn repay(
     Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(deposit_reserve_pubkey, false),
-            AccountMeta::new_readonly(collateral_reserve_pubkey, false),
+            AccountMeta::new(deposit_reserve_pubkey, false),
+            AccountMeta::new(collateral_reserve_pubkey, false),
             AccountMeta::new_readonly(authority_pubkey, false),
             AccountMeta::new(repayer_token_pubkey, false),
             AccountMeta::new(reserve_token_pubkey, false),
