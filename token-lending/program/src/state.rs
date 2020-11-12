@@ -46,13 +46,14 @@ pub struct ReserveInfo {
     pub is_initialized: bool,
     /// Pool address
     pub pool: Pubkey,
-    /// Reserve token pool
-    pub reserve: Pubkey,
-    /// Collateral token pool
-    pub collateral: Pubkey,
-    /// Liquidity tokens are minted when reserve tokens are deposited.
-    /// Liquidity tokens can be withdrawn back to the original reserve token.
-    pub liquidity_token_mint: Pubkey,
+    /// Reserve liquidity
+    pub liquidity_reserve: Pubkey,
+    /// Reserve collateral
+    /// Collateral is stored rather than burned to keep an accurate total collateral supply
+    pub collateral_reserve: Pubkey,
+    /// Collateral tokens are minted when liquidity is deposited in the reserve.
+    /// Collateral tokens can be withdrawn back to the underlying liquidity token.
+    pub collateral_mint: Pubkey,
     /// DEX market state account
     pub dex_market: COption<Pubkey>,
 
@@ -64,8 +65,8 @@ pub struct ReserveInfo {
     /// Cumulative borrow rate
     cumulative_borrow_rate: Decimal,
     /// Total borrows, plus interest
-    pub total_borrows: Decimal,
-    /// Last slot used to calculate borrow state
+    total_borrows: Decimal,
+    /// Last slot when borrow state was updated
     pub last_update_slot: u64,
 }
 
@@ -81,6 +82,16 @@ impl ReserveInfo {
         } else {
             Ok(self.market_price)
         }
+    }
+
+    /// Add new borrow amount to total borrows
+    pub fn add_borrow(&mut self, borrow_amount: Decimal) {
+        self.total_borrows += borrow_amount;
+    }
+
+    /// Subtract repay amount to total borrows
+    pub fn subtract_repay(&mut self, repay_amount: Decimal) {
+        self.total_borrows -= repay_amount;
     }
 
     /// Update the cumulative borrow rate for the reserve
@@ -99,8 +110,9 @@ impl ReserveInfo {
             let max_borrow_rate = Decimal::new(30, 2);
 
             let total_liquidity = Decimal::from(reserve_token.amount);
-            let utilization_rate = self.total_borrows / (self.total_borrows + total_liquidity);
-            let borrow_rate = if utilization_rate < optimal_utilization_rate {
+            let utilization_rate: Decimal =
+                self.total_borrows / (self.total_borrows + total_liquidity);
+            let borrow_rate: Decimal = if utilization_rate < optimal_utilization_rate {
                 // 50% should be normalized to 5/8 of the way to the optimal borrow rate
                 let normalized_rate = utilization_rate / optimal_utilization_rate;
                 // Borrow rate will then be 5/8 * optimal borrow rate
@@ -112,8 +124,8 @@ impl ReserveInfo {
             };
 
             let slots_elapsed = Decimal::from(clock.slot - self.last_update_slot);
-            let interest_rate = slots_elapsed * borrow_rate / SLOTS_PER_YEAR;
-            let accrued_interest = self.total_borrows * interest_rate;
+            let interest_rate: Decimal = slots_elapsed * borrow_rate / SLOTS_PER_YEAR;
+            let accrued_interest: Decimal = self.total_borrows * interest_rate;
 
             self.total_borrows += accrued_interest;
             self.cumulative_borrow_rate *= Decimal::from(1) + interest_rate;
@@ -182,10 +194,10 @@ impl ObligationInfo {
         }
 
         let slots_elapsed = Decimal::from(clock.slot - self.last_update_slot);
-        let borrow_rate =
+        let borrow_rate: Decimal =
             reserve.cumulative_borrow_rate / self.cumulative_borrow_rate - Decimal::from(1);
-        let yearly_interest = self.borrow_amount * borrow_rate;
-        let accrued_interest = slots_elapsed * yearly_interest / SLOTS_PER_YEAR;
+        let yearly_interest: Decimal = self.borrow_amount * borrow_rate;
+        let accrued_interest: Decimal = slots_elapsed * yearly_interest / SLOTS_PER_YEAR;
 
         self.borrow_amount += accrued_interest;
         self.cumulative_borrow_rate = reserve.cumulative_borrow_rate;
@@ -213,9 +225,9 @@ impl Pack for ReserveInfo {
         let (
             is_initialized,
             pool,
-            reserve,
+            liquidity,
             collateral,
-            liquidity_token_mint,
+            collateral_mint,
             dex_market,
             market_price,
             market_price_updated_slot,
@@ -230,9 +242,9 @@ impl Pack for ReserveInfo {
                 _ => return Err(ProgramError::InvalidAccountData),
             },
             pool: Pubkey::new_from_array(*pool),
-            reserve: Pubkey::new_from_array(*reserve),
-            collateral: Pubkey::new_from_array(*collateral),
-            liquidity_token_mint: Pubkey::new_from_array(*liquidity_token_mint),
+            liquidity_reserve: Pubkey::new_from_array(*liquidity),
+            collateral_reserve: Pubkey::new_from_array(*collateral),
+            collateral_mint: Pubkey::new_from_array(*collateral_mint),
             dex_market: unpack_coption_key(dex_market)?,
             market_price: u64::from_le_bytes(*market_price),
             market_price_updated_slot: u64::from_le_bytes(*market_price_updated_slot),
@@ -247,9 +259,9 @@ impl Pack for ReserveInfo {
         let (
             is_initialized,
             pool,
-            reserve,
+            liquidity,
             collateral,
-            pool_mint,
+            collateral_mint,
             dex_market,
             market_price,
             market_price_updated_slot,
@@ -259,9 +271,9 @@ impl Pack for ReserveInfo {
         ) = mut_array_refs![output, 1, 32, 32, 32, 32, 36, 8, 8, 16, 16, 8];
         is_initialized[0] = self.is_initialized as u8;
         pool.copy_from_slice(self.pool.as_ref());
-        reserve.copy_from_slice(self.reserve.as_ref());
-        collateral.copy_from_slice(self.collateral.as_ref());
-        pool_mint.copy_from_slice(self.liquidity_token_mint.as_ref());
+        liquidity.copy_from_slice(self.liquidity_reserve.as_ref());
+        collateral.copy_from_slice(self.collateral_reserve.as_ref());
+        collateral_mint.copy_from_slice(self.collateral_mint.as_ref());
         pack_coption_key(&self.dex_market, dex_market);
         *market_price = self.market_price.to_le_bytes();
         *market_price_updated_slot = self.market_price_updated_slot.to_le_bytes();
