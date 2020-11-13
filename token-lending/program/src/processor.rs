@@ -417,8 +417,8 @@ impl Processor {
 
         let deposit_token_price = Decimal::from(deposit_reserve.current_market_price(clock)?);
         let withdraw_token_price = Decimal::from(withdraw_reserve.current_market_price(clock)?);
-        let deposit_value = Decimal::from(collateral_amount) * deposit_token_price;
-        let borrow_amount = deposit_value / withdraw_token_price;
+        let collateral_value: Decimal = Decimal::from(collateral_amount) * deposit_token_price;
+        let borrow_amount: Decimal = collateral_value / withdraw_token_price;
 
         Self::token_transfer(TokenTransferParams {
             source: liquidity_reserve_info.clone(),
@@ -487,7 +487,7 @@ impl Processor {
         }
 
         let mut repay_reserve = ReserveInfo::unpack(&repay_reserve_info.data.borrow())?;
-        let mut withdraw_reserve = ReserveInfo::unpack(&withdraw_reserve_info.data.borrow())?;
+        let withdraw_reserve = ReserveInfo::unpack(&withdraw_reserve_info.data.borrow())?;
         if repay_reserve.pool != withdraw_reserve.pool {
             return Err(LendingError::PoolMismatch.into());
         }
@@ -501,9 +501,8 @@ impl Processor {
         let pool_key = repay_reserve.pool;
         let bump_seed = Self::find_authority_bump_seed(program_id, &pool_key);
 
-        let deposit_reserve_token =
-            &Self::unpack_token_account(&liquidity_reserve_info.data.borrow())?;
-        repay_reserve.update_cumulative_rate(clock, deposit_reserve_token);
+        let liquidity_reserve = &Self::unpack_token_account(&liquidity_reserve_info.data.borrow())?;
+        repay_reserve.update_cumulative_rate(clock, liquidity_reserve);
         obligation.accrue_interest(clock, &repay_reserve)?;
 
         let borrowed_amount = obligation.borrow_amount.round_u64();
@@ -543,12 +542,12 @@ impl Processor {
         obligation.collateral_amount -= collateral_withdraw_amount;
         ObligationInfo::pack(obligation, &mut obligation_info.data.borrow_mut())?;
 
-        withdraw_reserve.subtract_repay(Decimal::from(repay_amount));
+        repay_reserve.subtract_repay(Decimal::from(repay_amount));
+        ReserveInfo::pack(repay_reserve, &mut repay_reserve_info.data.borrow_mut())?;
         ReserveInfo::pack(
             withdraw_reserve,
             &mut withdraw_reserve_info.data.borrow_mut(),
         )?;
-        ReserveInfo::pack(repay_reserve, &mut repay_reserve_info.data.borrow_mut())?;
 
         Ok(())
     }

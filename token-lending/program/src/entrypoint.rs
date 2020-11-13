@@ -202,7 +202,7 @@ mod test {
 
         test.set_bpf_compute_max_units(3000000);
 
-        let (mut banks_client, payer, recent_blockhash, _bank_forks) = test.start().await;
+        let (mut banks_client, payer, recent_blockhash, bank_forks) = test.start().await;
 
         let pool_keypair = Keypair::new();
         let pool_pubkey = pool_keypair.pubkey();
@@ -483,12 +483,17 @@ mod test {
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
 
-        // {
-        //     let bank = bank_forks.write().unwrap().working_bank();
-        //     bank.get_sy
-        //     bank.store_account(clock::id(), solana_sdk::account::create_account(
-        //         clock, lamports))
-        // }
+        {
+            use solana_sdk::sysvar::clock;
+            let bank = bank_forks.write().unwrap().working_bank();
+            let account = bank.get_account(&clock::id()).unwrap();
+            let mut clock = bank.clock();
+            clock.slot += crate::state::SLOTS_PER_YEAR;
+            bank.store_account(
+                &clock::id(),
+                &solana_sdk::account::create_account(&clock, account.lamports),
+            );
+        }
 
         let mut transaction = Transaction::new_with_payer(
             &[repay(
@@ -510,5 +515,14 @@ mod test {
         transaction.sign(&[&payer], recent_blockhash);
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
+
+        // Verify obligation Account
+        let obligation_account: Account = banks_client
+            .get_account(obligation_pubkey)
+            .await
+            .unwrap()
+            .unwrap();
+        let obligation_info = ObligationInfo::unpack(&obligation_account.data[..]).unwrap();
+        assert_eq!(obligation_info.borrow_amount.round_u64(), 661200);
     }
 }

@@ -20,9 +20,8 @@ const PRICE_EXPIRATION_SLOTS: u64 = 5;
 pub const MAX_RESERVES: u8 = 10;
 const MAX_RESERVES_USIZE: usize = MAX_RESERVES as usize;
 
-const SLOTS_PER_YEAR: Decimal = Decimal::from_val(
-    (DEFAULT_TICKS_PER_SECOND / DEFAULT_TICKS_PER_SLOT * SECONDS_PER_DAY * 365) as u128,
-);
+pub(crate) const SLOTS_PER_YEAR: u64 =
+    DEFAULT_TICKS_PER_SECOND / DEFAULT_TICKS_PER_SLOT * SECONDS_PER_DAY * 365;
 
 /// Lending pool state
 #[repr(C)]
@@ -124,7 +123,8 @@ impl ReserveInfo {
             };
 
             let slots_elapsed = Decimal::from(clock.slot - self.last_update_slot);
-            let interest_rate: Decimal = slots_elapsed * borrow_rate / SLOTS_PER_YEAR;
+            let interest_rate: Decimal =
+                slots_elapsed * borrow_rate / Decimal::from(SLOTS_PER_YEAR);
             let accrued_interest: Decimal = self.total_borrows * interest_rate;
 
             self.total_borrows += accrued_interest;
@@ -197,7 +197,8 @@ impl ObligationInfo {
         let borrow_rate: Decimal =
             reserve.cumulative_borrow_rate / self.cumulative_borrow_rate - Decimal::from(1);
         let yearly_interest: Decimal = self.borrow_amount * borrow_rate;
-        let accrued_interest: Decimal = slots_elapsed * yearly_interest / SLOTS_PER_YEAR;
+        let accrued_interest: Decimal =
+            slots_elapsed * yearly_interest / Decimal::from(SLOTS_PER_YEAR);
 
         self.borrow_amount += accrued_interest;
         self.cumulative_borrow_rate = reserve.cumulative_borrow_rate;
@@ -416,7 +417,7 @@ fn unpack_coption_key(src: &[u8; 36]) -> Result<COption<Pubkey>, ProgramError> {
 }
 
 fn pack_decimal(decimal: Decimal, dst: &mut [u8; 16]) {
-    *dst = decimal.scaled_val().to_le_bytes();
+    *dst = decimal.to_scaled_val().to_le_bytes();
 }
 
 fn unpack_decimal(src: &[u8; 16]) -> Decimal {

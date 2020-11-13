@@ -18,6 +18,7 @@ serum_dex = { git = "https://github.com/jstarry/serum-dex", rev = "ea787c9", fea
 solana-program = "1.4.6"
 spl-token = { path = "../../token/program", features = [ "no-entrypoint" ] }
 thiserror = "1.0"
+uint = "0.8"
 
 [dev-dependencies]
 base64 = "0.13"
