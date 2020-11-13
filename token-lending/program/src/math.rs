@@ -19,7 +19,7 @@ const SCALE: usize = 18;
 
 impl Decimal {
     fn scaler() -> U256 {
-        U256::exp10(SCALE)
+        U256::from(1_000_000_000_000_000_000u64)
     }
 
     /// Create scaled decimal from value and scale
@@ -112,5 +112,15 @@ impl std::ops::DivAssign for Decimal {
 impl std::ops::MulAssign for Decimal {
     fn mul_assign(&mut self, rhs: Self) {
         *self = *self * rhs;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_scaler() {
+        assert_eq!(U256::exp10(SCALE), Decimal::scaler());
     }
 }

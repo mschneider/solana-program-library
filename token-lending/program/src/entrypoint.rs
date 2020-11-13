@@ -200,10 +200,9 @@ mod test {
             processor!(spl_token::processor::Processor::process),
         );
 
-        test.set_bpf_compute_max_units(3000000);
-
         let (mut banks_client, payer, recent_blockhash, bank_forks) = test.start().await;
 
+        let rent = banks_client.get_rent().await.unwrap();
         let pool_keypair = Keypair::new();
         let pool_pubkey = pool_keypair.pubkey();
         let (pool_authority_pubkey, _bump_seed) =
@@ -214,7 +213,7 @@ mod test {
                 create_account(
                     &payer.pubkey(),
                     &pool_pubkey,
-                    3354720,
+                    rent.minimum_balance(PoolInfo::LEN),
                     PoolInfo::LEN as u64,
                     &program_id,
                 ),
@@ -324,7 +323,7 @@ mod test {
                 create_account(
                     &payer.pubkey(),
                     &sol_reserve_pubkey,
-                    2429040,
+                    rent.minimum_balance(ReserveInfo::LEN),
                     ReserveInfo::LEN as u64,
                     &program_id,
                 ),
@@ -340,7 +339,7 @@ mod test {
                 create_account(
                     &payer.pubkey(),
                     &usdc_reserve_pubkey,
-                    2429040,
+                    rent.minimum_balance(ReserveInfo::LEN),
                     ReserveInfo::LEN as u64,
                     &program_id,
                 ),
@@ -455,7 +454,7 @@ mod test {
                 create_account(
                     &payer.pubkey(),
                     &obligation_pubkey,
-                    17260801,
+                    rent.minimum_balance(ObligationInfo::LEN),
                     ObligationInfo::LEN as u64,
                     &program_id,
                 ),
@@ -484,6 +483,7 @@ mod test {
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
 
         {
+            // Advance the clock one full year so that interest is accumulated
             use solana_sdk::sysvar::clock;
             let bank = bank_forks.write().unwrap().working_bank();
             let account = bank.get_account(&clock::id()).unwrap();
