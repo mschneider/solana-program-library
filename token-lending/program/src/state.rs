@@ -20,7 +20,8 @@ const PRICE_EXPIRATION_SLOTS: u64 = 5;
 pub const MAX_RESERVES: u8 = 10;
 const MAX_RESERVES_USIZE: usize = MAX_RESERVES as usize;
 
-pub(crate) const SLOTS_PER_YEAR: u64 =
+/// Number of slots per year
+pub const SLOTS_PER_YEAR: u64 =
     DEFAULT_TICKS_PER_SECOND / DEFAULT_TICKS_PER_SLOT * SECONDS_PER_DAY * 365;
 
 /// Lending pool state
@@ -94,7 +95,11 @@ impl ReserveInfo {
     }
 
     /// Update the cumulative borrow rate for the reserve
-    pub fn update_cumulative_rate(&mut self, clock: &Clock, reserve_token: &TokenAccount) {
+    pub fn update_cumulative_rate(
+        &mut self,
+        clock: &Clock,
+        reserve_token: &TokenAccount,
+    ) -> Decimal {
         if self.last_update_slot == 0 {
             self.last_update_slot = clock.slot;
             self.cumulative_borrow_rate = Decimal::from(1u64);
@@ -131,24 +136,16 @@ impl ReserveInfo {
             self.cumulative_borrow_rate *= Decimal::from(1) + interest_rate;
             self.last_update_slot = clock.slot;
         }
+
+        self.cumulative_borrow_rate
     }
 
-    /// Get cumulative borrow rate for the reserve
-    pub fn get_cumulative_borrow_rate(&mut self, clock: &Clock) -> Result<Decimal, ProgramError> {
-        if clock.slot == self.last_update_slot {
-            Ok(self.cumulative_borrow_rate)
-        } else {
-            info!("reserve borrow state is old");
-            Err(LendingError::InvalidInput.into())
-        }
-    }
-
-    /// Return the current exchange rate.
-    pub fn exchange_rate(
+    /// Return the current collateral exchange rate.
+    pub fn collateral_exchange_rate(
         &self,
         clock: &Clock,
         reserve_token: &TokenAccount,
-        liquidity_mint: &Mint,
+        collateral_mint: &Mint,
     ) -> Result<Decimal, ProgramError> {
         // TODO: is exchange rate fixed within a slot?
         if self.last_update_slot != clock.slot {
@@ -156,7 +153,7 @@ impl ReserveInfo {
             Err(LendingError::InvalidInput.into())
         } else {
             Ok((self.total_borrows + Decimal::from(reserve_token.amount))
-                / Decimal::from(liquidity_mint.supply))
+                / Decimal::from(collateral_mint.supply))
         }
     }
 }

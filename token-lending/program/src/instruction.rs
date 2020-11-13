@@ -67,7 +67,7 @@ pub enum LendingInstruction {
     /// Borrow tokens from a reserve by depositing collateral tokens. The number of borrowed tokens
     /// is calculated by market price.
     ///
-    ///   0. `[writable]` Deposit reserve account.
+    ///   0. `[]` Deposit reserve account.
     ///   1. `[writable]` Borrow reserve account.
     ///   1. `[]` Derived pool authority ($authority).
     ///   5. `[writable]` Liquidity reserve SPL Token account
@@ -89,7 +89,7 @@ pub enum LendingInstruction {
     /// will be recalculated for interest. Must be signed by obligation authority.
     ///
     ///   0. `[writable]` Repay reserve account.
-    ///   1. `[writable]` Withdraw reserve account.
+    ///   1. `[]` Withdraw reserve account.
     ///   1. `[]` Derived pool authority ($authority).
     ///   3. `[writable]` Liquidity input SPL Token account, $authority can transfer $repay_amount
     ///   4. `[writable]` Liquidity reserve SPL Token account
@@ -330,7 +330,7 @@ pub fn borrow(
     Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new(deposit_reserve_pubkey, false),
+            AccountMeta::new_readonly(deposit_reserve_pubkey, false),
             AccountMeta::new(borrow_reserve_pubkey, false),
             AccountMeta::new_readonly(pool_authority_pubkey, false),
             AccountMeta::new(liquidity_reserve_pubkey, false),
@@ -369,7 +369,7 @@ pub fn repay(
         program_id,
         accounts: vec![
             AccountMeta::new(repay_reserve_pubkey, false),
-            AccountMeta::new(withdraw_reserve_pubkey, false),
+            AccountMeta::new_readonly(withdraw_reserve_pubkey, false),
             AccountMeta::new_readonly(pool_authority_pubkey, false),
             AccountMeta::new(liquidity_input_pubkey, false),
             AccountMeta::new(liquidity_reserve_pubkey, false),
