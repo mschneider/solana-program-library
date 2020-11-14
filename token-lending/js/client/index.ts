@@ -51,8 +51,8 @@ export const PoolReserveLayout: typeof BufferLayout.Structure = BufferLayout.str
     Layout.publicKey("collateralToken"),
     Layout.publicKey("liquidityTokenMint"),
     Layout.publicKey("dexMarket"),
-    BufferLayout.u64("marketPrice"),
-    BufferLayout.u64("marketPriceUpdatedSlot"),
+    BufferLayout.nu64("marketPrice"),
+    BufferLayout.nu64("marketPriceUpdatedSlot"),
   ]
 );
 
@@ -61,11 +61,11 @@ export const PoolReserveLayout: typeof BufferLayout.Structure = BufferLayout.str
  */
 export const BorrowObligationLayout: typeof BufferLayout.Structure = BufferLayout.struct(
   [
-    BufferLayout.u64("createdAtSlot"),
+    BufferLayout.nu64("createdAtSlot"),
     Layout.publicKey("authority"),
-    BufferLayout.u64("collateralAmount"),
+    BufferLayout.nu64("collateralAmount"),
     Layout.publicKey("collateralReserve"),
-    BufferLayout.u64("borrowAmount"),
+    BufferLayout.nu64("borrowAmount"),
     Layout.publicKey("borrowReserve"),
   ]
 );
