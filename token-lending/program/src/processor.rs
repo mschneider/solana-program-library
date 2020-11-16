@@ -70,10 +70,6 @@ fn process_init_pool(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
     let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
-    let mut pool = PoolInfo::unpack_unchecked(&pool_info.data.borrow())?;
-    if pool.is_initialized() {
-        return Err(LendingError::AlreadyInUse.into());
-    }
     if !rent.is_exempt(pool_info.lamports(), pool_info.data_len()) {
         info!(&rent.minimum_balance(pool_info.data_len()).to_string());
         return Err(LendingError::NotRentExempt.into());
@@ -82,11 +78,13 @@ fn process_init_pool(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
     if quote_token_mint_info.owner != token_program_id.key {
         return Err(LendingError::InvalidTokenProgram.into());
     }
+
     unpack_mint(&quote_token_mint_info.data.borrow())?;
 
-    pool.is_initialized = true;
-    pool.quote_token_mint = *quote_token_mint_info.key;
-    PoolInfo::pack(pool, &mut pool_info.data.borrow_mut())?;
+    let mut new_pool: PoolInfo = assert_uninitialized(pool_info)?;
+    new_pool.is_initialized = true;
+    new_pool.quote_token_mint = *quote_token_mint_info.key;
+    PoolInfo::pack(new_pool, &mut pool_info.data.borrow_mut())?;
 
     Ok(())
 }
@@ -105,10 +103,6 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     let rent = &Rent::from_account_info(rent_info)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
-    let mut reserve = ReserveInfo::unpack_unchecked(&reserve_info.data.borrow())?;
-    if reserve.is_initialized() {
-        return Err(LendingError::AlreadyInUse.into());
-    }
     if !rent.is_exempt(reserve_info.lamports(), reserve_info.data_len()) {
         info!(&rent.minimum_balance(reserve_info.data_len()).to_string());
         return Err(LendingError::NotRentExempt.into());
@@ -134,19 +128,28 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     }
 
     let liquidity_reserve = unpack_token_account(&liquidity_reserve_info.data.borrow())?;
-    if pool_authority_info.key != &liquidity_reserve.owner {
+    if liquidity_reserve.owner != *pool_authority_info.key {
         return Err(LendingError::InvalidOwner.into());
     }
-
-    let collateral_output = Token::unpack_unchecked(&collateral_output_info.data.borrow())?;
-    let collateral_reserve = Token::unpack_unchecked(&collateral_reserve_info.data.borrow())?;
-    let collateral_mint = Mint::unpack_unchecked(&collateral_mint_info.data.borrow())?;
-    if collateral_mint.is_initialized()
-        || collateral_reserve.is_initialized()
-        || collateral_output.is_initialized()
-    {
-        return Err(LendingError::AlreadyInUse.into());
+    if liquidity_reserve.close_authority.is_some() {
+        return Err(LendingError::InvalidCloseAuthority.into());
     }
+    if liquidity_reserve.delegate.is_some() {
+        return Err(LendingError::InvalidDelegate.into());
+    }
+    if liquidity_reserve.close_authority.is_some() {
+        return Err(LendingError::InvalidCloseAuthority.into());
+    }
+    if liquidity_reserve.delegate.is_some() {
+        return Err(LendingError::InvalidDelegate.into());
+    }
+    if liquidity_reserve.amount == 0 {
+        return Err(LendingError::InvalidInput.into());
+    }
+
+    assert_uninitialized::<Token>(collateral_output_info)?;
+    assert_uninitialized::<Token>(collateral_reserve_info)?;
+    assert_uninitialized::<Mint>(collateral_mint_info)?;
 
     spl_token_init_mint(TokenInitializeMintParams {
         mint: collateral_mint_info.clone(),
@@ -180,22 +183,6 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         bump_seed,
         token_program: token_program_id.clone(),
     })?;
-
-    if liquidity_reserve.close_authority.is_some() {
-        return Err(LendingError::InvalidCloseAuthority.into());
-    }
-    if liquidity_reserve.delegate.is_some() {
-        return Err(LendingError::InvalidDelegate.into());
-    }
-    if liquidity_reserve.close_authority.is_some() {
-        return Err(LendingError::InvalidCloseAuthority.into());
-    }
-    if liquidity_reserve.delegate.is_some() {
-        return Err(LendingError::InvalidDelegate.into());
-    }
-    if liquidity_reserve.amount == 0 {
-        return Err(LendingError::InvalidInput.into());
-    }
 
     let dex_market = if liquidity_reserve.mint != pool.quote_token_mint {
         let dex_market_info = next_account_info(account_info_iter)?;
@@ -232,14 +219,15 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         COption::None
     };
 
-    reserve.is_initialized = true;
-    reserve.pool = *pool_info.key;
-    reserve.liquidity_reserve = *liquidity_reserve_info.key;
-    reserve.collateral_reserve = *collateral_reserve_info.key;
-    reserve.collateral_mint = *collateral_mint_info.key;
-    reserve.dex_market = dex_market;
-    reserve.update_cumulative_rate(clock, &liquidity_reserve);
-    ReserveInfo::pack(reserve, &mut reserve_info.data.borrow_mut())?;
+    let mut new_reserve: ReserveInfo = assert_uninitialized(reserve_info)?;
+    new_reserve.is_initialized = true;
+    new_reserve.pool = *pool_info.key;
+    new_reserve.liquidity_reserve = *liquidity_reserve_info.key;
+    new_reserve.collateral_reserve = *collateral_reserve_info.key;
+    new_reserve.collateral_mint = *collateral_mint_info.key;
+    new_reserve.dex_market = dex_market;
+    new_reserve.update_cumulative_rate(clock, &liquidity_reserve);
+    ReserveInfo::pack(new_reserve, &mut reserve_info.data.borrow_mut())?;
 
     Ok(())
 }
@@ -387,10 +375,6 @@ fn process_borrow(
     let rent = &Rent::from_account_info(rent_info)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
-    let obligation = ObligationInfo::unpack_unchecked(&obligation_info.data.borrow())?;
-    if obligation.is_initialized() {
-        return Err(LendingError::AlreadyInUse.into());
-    }
     if !rent.is_exempt(obligation_info.lamports(), obligation_info.data_len()) {
         info!(&rent.minimum_balance(obligation_info.data_len()).to_string());
         return Err(LendingError::NotRentExempt.into());
@@ -450,11 +434,8 @@ fn process_borrow(
         return Err(LendingError::InvalidTokenProgram.into());
     }
 
-    let debt_mint = Mint::unpack_unchecked(&obligation_token_mint_info.data.borrow())?;
-    let debt_output = Token::unpack_unchecked(&obligation_token_output_info.data.borrow())?;
-    if debt_mint.is_initialized() || debt_output.is_initialized() {
-        return Err(LendingError::AlreadyInUse.into());
-    }
+    assert_uninitialized::<Mint>(obligation_token_mint_info)?;
+    assert_uninitialized::<Token>(obligation_token_output_info)?;
 
     let pool_authority = &authority_id(program_id, &deposit_reserve.pool, bump_seed)?;
     spl_token_init_mint(TokenInitializeMintParams {
@@ -482,18 +463,15 @@ fn process_borrow(
         token_program: token_program_id.clone(),
     })?;
 
-    ObligationInfo::pack(
-        ObligationInfo {
-            last_update_slot: clock.slot,
-            collateral_amount,
-            collateral_reserve: *deposit_reserve_info.key,
-            cumulative_borrow_rate,
-            borrow_amount,
-            borrow_reserve: *borrow_reserve_info.key,
-            token_mint: *obligation_token_mint_info.key,
-        },
-        &mut obligation_info.data.borrow_mut(),
-    )?;
+    let mut new_obligation: ObligationInfo = assert_uninitialized(obligation_info)?;
+    new_obligation.last_update_slot = clock.slot;
+    new_obligation.collateral_amount = collateral_amount;
+    new_obligation.collateral_reserve = *deposit_reserve_info.key;
+    new_obligation.cumulative_borrow_rate = cumulative_borrow_rate;
+    new_obligation.borrow_amount = borrow_amount;
+    new_obligation.borrow_reserve = *borrow_reserve_info.key;
+    new_obligation.token_mint = *obligation_token_mint_info.key;
+    ObligationInfo::pack(new_obligation, &mut obligation_info.data.borrow_mut())?;
 
     Ok(())
 }
@@ -690,6 +668,17 @@ fn process_set_price(accounts: &[AccountInfo]) -> ProgramResult {
     ReserveInfo::pack(reserve, &mut reserve_info.data.borrow_mut())?;
 
     Ok(())
+}
+
+fn assert_uninitialized<T: Pack + IsInitialized>(
+    account_info: &AccountInfo,
+) -> Result<T, ProgramError> {
+    let account: T = T::unpack_unchecked(&account_info.data.borrow())?;
+    if account.is_initialized() {
+        Err(LendingError::AlreadyInUse.into())
+    } else {
+        Ok(account)
+    }
 }
 
 /// Generates seed bump for lending pool authorities
