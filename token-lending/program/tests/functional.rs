@@ -112,7 +112,7 @@ async fn test_transaction() {
         .unwrap();
     let user_sol_collateral = Token::unpack(&user_sol_collateral_account.data[..]).unwrap();
     assert_eq!(user_sol.amount, 0);
-    assert_eq!(user_sol_collateral.amount, 1000);
+    assert_eq!(user_sol_collateral.amount, 2000);
 
     let obligation = pool
         .borrow(

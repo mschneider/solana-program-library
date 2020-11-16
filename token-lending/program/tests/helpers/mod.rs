@@ -223,8 +223,9 @@ impl TestReserve {
     ) -> Self {
         let keypair = Keypair::new();
         let pubkey = keypair.pubkey();
-        let collateral_mint_pubkey =
-            create_mint_account(banks_client, &payer, Some(pool.authority_pubkey)).await;
+        let collateral_mint_keypair = Keypair::new();
+        let user_collateral_token_keypair = Keypair::new();
+        let collateral_reserve_keypair = Keypair::new();
 
         let user_token_pubkey = create_token_account(
             banks_client,
@@ -232,15 +233,6 @@ impl TestReserve {
             &payer,
             Some(pool.authority_pubkey),
             user_amount,
-        )
-        .await;
-
-        let user_collateral_token_pubkey = create_token_account(
-            banks_client,
-            collateral_mint_pubkey,
-            &payer,
-            Some(pool.authority_pubkey),
-            None,
         )
         .await;
 
@@ -276,18 +268,30 @@ impl TestReserve {
             .await
         };
 
-        let collateral_reserve_pubkey = create_token_account(
-            banks_client,
-            collateral_mint_pubkey,
-            &payer,
-            Some(pool.authority_pubkey),
-            None,
-        )
-        .await;
-
         let rent = banks_client.get_rent().await.unwrap();
         let mut transaction = Transaction::new_with_payer(
             &[
+                create_account(
+                    &payer.pubkey(),
+                    &collateral_mint_keypair.pubkey(),
+                    rent.minimum_balance(Mint::LEN),
+                    Mint::LEN as u64,
+                    &spl_token::id(),
+                ),
+                create_account(
+                    &payer.pubkey(),
+                    &collateral_reserve_keypair.pubkey(),
+                    rent.minimum_balance(Token::LEN),
+                    Token::LEN as u64,
+                    &spl_token::id(),
+                ),
+                create_account(
+                    &payer.pubkey(),
+                    &user_collateral_token_keypair.pubkey(),
+                    rent.minimum_balance(Token::LEN),
+                    Token::LEN as u64,
+                    &spl_token::id(),
+                ),
                 create_account(
                     &payer.pubkey(),
                     &pubkey,
@@ -300,8 +304,9 @@ impl TestReserve {
                     pubkey,
                     pool.keypair.pubkey(),
                     liquidity_reserve_pubkey,
-                    collateral_reserve_pubkey,
-                    collateral_mint_pubkey,
+                    collateral_mint_keypair.pubkey(),
+                    collateral_reserve_keypair.pubkey(),
+                    user_collateral_token_keypair.pubkey(),
                     Some(market.pubkey),
                 ),
             ],
@@ -309,17 +314,27 @@ impl TestReserve {
         );
 
         let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
-        transaction.sign(&[&payer, &keypair, &pool.keypair], recent_blockhash);
+        transaction.sign(
+            &vec![
+                payer,
+                &keypair,
+                &pool.keypair,
+                &collateral_mint_keypair,
+                &collateral_reserve_keypair,
+                &user_collateral_token_keypair,
+            ],
+            recent_blockhash,
+        );
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
 
         Self {
             pubkey,
             user_token_pubkey,
-            user_collateral_token_pubkey,
+            user_collateral_token_pubkey: user_collateral_token_keypair.pubkey(),
             liquidity_reserve_pubkey,
-            collateral_reserve_pubkey,
-            collateral_mint_pubkey,
+            collateral_reserve_pubkey: collateral_reserve_keypair.pubkey(),
+            collateral_mint_pubkey: collateral_mint_keypair.pubkey(),
         }
     }
 
@@ -431,45 +446,6 @@ impl TestMarket {
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
     }
-}
-
-pub async fn create_mint_account(
-    banks_client: &mut BanksClient,
-    payer: &Keypair,
-    authority: Option<Pubkey>,
-) -> Pubkey {
-    let mint_keypair = Keypair::new();
-    let mint_pubkey = mint_keypair.pubkey();
-    let authority_pubkey = authority.unwrap_or_else(|| payer.pubkey());
-
-    let rent = banks_client.get_rent().await.unwrap();
-    let mut transaction = Transaction::new_with_payer(
-        &[
-            create_account(
-                &payer.pubkey(),
-                &mint_pubkey,
-                rent.minimum_balance(Mint::LEN),
-                Mint::LEN as u64,
-                &spl_token::id(),
-            ),
-            spl_token::instruction::initialize_mint(
-                &spl_token::id(),
-                &mint_pubkey,
-                &authority_pubkey,
-                None,
-                0,
-            )
-            .unwrap(),
-        ],
-        Some(&payer.pubkey()),
-    );
-
-    let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
-    transaction.sign(&[&payer, &mint_keypair], recent_blockhash);
-
-    assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
-
-    mint_pubkey
 }
 
 pub async fn create_token_account(

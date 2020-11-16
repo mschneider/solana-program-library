@@ -25,13 +25,15 @@ pub enum LendingInstruction {
     ///
     ///   0. `[writable]` Reserve account.
     ///   1. `[signer]` Pool account.
-    ///   2. `[]` Liquidity reserve SPL Token account. Must NOT be empty, owned by pool authority
-    ///   3. `[]` Collateral reserve SPL Token account. Must be empty, owned by pool authority, minted by collateral token mint.
-    ///   4. `[]` Collateral SPL Token mint. Must be empty, owned by pool authority (TODO: must be uninitialized)
-    ///   5. `[]` Clock sysvar
-    ///   6. `[]` Rent sysvar
-    ///   7. '[]` Token program id
-    ///   8. `[optional]` Serum DEX market account. Not required for quote currency reserves. Must be initialized and match quote and base currency.
+    ///   2. `[]` Derived pool authority ($authority).
+    ///   3. `[]` Liquidity reserve SPL Token account. Must NOT be empty, owned by $authority
+    ///   4. `[]` Collateral token mint - uninitialized
+    ///   5. `[]` Collateral token reserve - uninitialized
+    ///   6. `[]` Collateral token output - uninitialized
+    ///   7. `[]` Clock sysvar
+    ///   8. `[]` Rent sysvar
+    ///   9. '[]` Token program id
+    ///   10 `[optional]` Serum DEX market account. Not required for quote currency reserves. Must be initialized and match quote and base currency.
     InitReserve, // TODO: maintenance margin percent, interest rate strategy
 
     /// Deposit liquidity into a reserve. The output is a collateral token representing ownership
@@ -215,16 +217,21 @@ pub fn init_reserve(
     reserve_pubkey: Pubkey,
     pool_pubkey: Pubkey,
     liquidity_reserve_pubkey: Pubkey,
-    collateral_reserve_pubkey: Pubkey,
     collateral_mint_pubkey: Pubkey,
+    collateral_reserve_pubkey: Pubkey,
+    collateral_output_pubkey: Pubkey,
     market_pubkey: Option<Pubkey>,
 ) -> Instruction {
+    let (pool_authority_pubkey, _bump_seed) =
+        Pubkey::find_program_address(&[&pool_pubkey.to_bytes()[..32]], &program_id);
     let mut accounts = vec![
         AccountMeta::new(reserve_pubkey, false),
         AccountMeta::new_readonly(pool_pubkey, true),
+        AccountMeta::new_readonly(pool_authority_pubkey, false),
         AccountMeta::new_readonly(liquidity_reserve_pubkey, false),
-        AccountMeta::new_readonly(collateral_reserve_pubkey, false),
-        AccountMeta::new_readonly(collateral_mint_pubkey, false),
+        AccountMeta::new(collateral_mint_pubkey, false),
+        AccountMeta::new(collateral_reserve_pubkey, false),
+        AccountMeta::new(collateral_output_pubkey, false),
         AccountMeta::new_readonly(sysvar::clock::id(), false),
         AccountMeta::new_readonly(sysvar::rent::id(), false),
         AccountMeta::new_readonly(spl_token::id(), false),
