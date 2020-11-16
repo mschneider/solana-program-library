@@ -156,8 +156,6 @@ impl ReserveInfo {
 pub struct ObligationInfo {
     /// Slot when obligation was updated. Used for calculating interest.
     pub last_update_slot: u64,
-    /// Address that has the authority to repay this obligation
-    pub authority: Pubkey,
     /// Amount of collateral tokens deposited for this obligation
     pub collateral_amount: u64,
     /// Reserve which collateral tokens were deposited into
@@ -168,6 +166,8 @@ pub struct ObligationInfo {
     pub borrow_amount: Decimal,
     /// Reserve which tokens were borrowed from
     pub borrow_reserve: Pubkey,
+    /// Mint address of the debt tokens for this obligation
+    pub token_mint: Pubkey,
 }
 
 impl ObligationInfo {
@@ -325,21 +325,21 @@ impl Pack for ObligationInfo {
         #[allow(clippy::ptr_offset_with_cast)]
         let (
             last_update_slot,
-            authority,
             collateral_amount,
             collateral_reserve,
             cumulative_borrow_rate,
             borrow_amount,
             borrow_reserve,
-        ) = array_refs![input, 8, 32, 8, 32, 16, 16, 32];
+            debt_token_mint,
+        ) = array_refs![input, 8, 8, 32, 16, 16, 32, 32];
         Ok(Self {
             last_update_slot: u64::from_le_bytes(*last_update_slot),
-            authority: Pubkey::new_from_array(*authority),
             collateral_amount: u64::from_le_bytes(*collateral_amount),
             collateral_reserve: Pubkey::new_from_array(*collateral_reserve),
             cumulative_borrow_rate: unpack_decimal(cumulative_borrow_rate),
             borrow_amount: unpack_decimal(borrow_amount),
             borrow_reserve: Pubkey::new_from_array(*borrow_reserve),
+            token_mint: Pubkey::new_from_array(*debt_token_mint),
         })
     }
 
@@ -347,21 +347,21 @@ impl Pack for ObligationInfo {
         let output = array_mut_ref![output, 0, OBLIGATION_LEN];
         let (
             last_update_slot,
-            authority,
             collateral_amount,
             collateral_reserve,
             cumulative_borrow_rate,
             borrow_amount,
             borrow_reserve,
-        ) = mut_array_refs![output, 8, 32, 8, 32, 16, 16, 32];
+            debt_token_mint,
+        ) = mut_array_refs![output, 8, 8, 32, 16, 16, 32, 32];
 
         *last_update_slot = self.last_update_slot.to_le_bytes();
-        authority.copy_from_slice(self.authority.as_ref());
         *collateral_amount = self.collateral_amount.to_le_bytes();
         collateral_reserve.copy_from_slice(self.collateral_reserve.as_ref());
         pack_decimal(self.cumulative_borrow_rate, cumulative_borrow_rate);
         pack_decimal(self.borrow_amount, borrow_amount);
         borrow_reserve.copy_from_slice(self.borrow_reserve.as_ref());
+        debt_token_mint.copy_from_slice(self.token_mint.as_ref());
     }
 }
 

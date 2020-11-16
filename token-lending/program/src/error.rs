@@ -61,6 +61,12 @@ pub enum LendingError {
     /// Reserve price is expired
     #[error("Reserve price is expired")]
     ReservePriceExpired,
+    /// Token initialize mint failed
+    #[error("Token initialize mint failed")]
+    TokenInitializeMintFailed,
+    /// Token initialize account failed
+    #[error("Token initialize account failed")]
+    TokenInitializeAccountFailed,
     /// Token transfer failed
     #[error("Token transfer failed")]
     TokenTransferFailed,

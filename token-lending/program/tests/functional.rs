@@ -4,12 +4,9 @@ use assert_matches::*;
 use helpers::*;
 use solana_program::{program_option::COption, program_pack::Pack};
 use solana_program_test::*;
-use solana_sdk::{account::Account, signature::Signer, transaction::Transaction};
+use solana_sdk::{signature::Signer, transaction::Transaction};
 use spl_token::state::Account as Token;
-use spl_token_lending::{
-    instruction::repay,
-    state::{ObligationInfo, SLOTS_PER_YEAR},
-};
+use spl_token_lending::{instruction::repay, state::SLOTS_PER_YEAR};
 
 #[tokio::test]
 async fn test_transaction() {
@@ -117,8 +114,15 @@ async fn test_transaction() {
     assert_eq!(user_sol.amount, 0);
     assert_eq!(user_sol_collateral.amount, 1000);
 
-    let obligation_pubkey = pool
-        .borrow(&mut banks_client, &payer, &sol_reserve, &usdc_reserve, 1000)
+    let obligation = pool
+        .borrow(
+            &mut banks_client,
+            &payer,
+            &sol_reserve,
+            &usdc_reserve,
+            1000,
+            pool.authority_pubkey,
+        )
         .await;
 
     {
@@ -142,11 +146,12 @@ async fn test_transaction() {
             pool.authority_pubkey,
             usdc_reserve.user_token_pubkey,
             usdc_reserve.liquidity_reserve_pubkey,
+            2204000,
             sol_reserve.collateral_reserve_pubkey,
             sol_reserve.user_collateral_token_pubkey,
-            2204000,
-            obligation_pubkey,
-            payer.pubkey(),
+            obligation.pubkey,
+            obligation.token_mint,
+            obligation.token_account,
         )],
         Some(&payer.pubkey()),
     );
@@ -156,11 +161,6 @@ async fn test_transaction() {
     assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
 
     // Verify obligation Account
-    let obligation_account: Account = banks_client
-        .get_account(obligation_pubkey)
-        .await
-        .unwrap()
-        .unwrap();
-    let obligation_info = ObligationInfo::unpack(&obligation_account.data[..]).unwrap();
+    let obligation_info = obligation.get_info(&mut banks_client).await;
     assert_eq!(obligation_info.borrow_amount.round_u64(), 661200);
 }

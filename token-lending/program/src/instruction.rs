@@ -65,43 +65,45 @@ pub enum LendingInstruction {
     },
 
     /// Borrow tokens from a reserve by depositing collateral tokens. The number of borrowed tokens
-    /// is calculated by market price.
+    /// is calculated by market price. The debt obligation is tokenized.
     ///
     ///   0. `[]` Deposit reserve account.
     ///   1. `[writable]` Borrow reserve account.
-    ///   1. `[]` Derived pool authority ($authority).
-    ///   5. `[writable]` Liquidity reserve SPL Token account
-    ///   6. `[writable]` Liquidity output SPL Token account
-    ///   3. `[writable]` Collateral input SPL Token account, $authority can transfer $collateral_amount
-    ///   4. `[writable]` Collateral reserve SPL Token account
+    ///   2. `[]` Derived pool authority ($authority).
+    ///   3. `[writable]` Liquidity reserve SPL Token account
+    ///   4. `[writable]` Liquidity output SPL Token account
+    ///   5. `[writable]` Collateral input SPL Token account, $authority can transfer $collateral_amount
+    ///   6. `[writable]` Collateral reserve SPL Token account
     ///   7. `[writable]` Obligation - uninitialized
-    ///   8. `[]` Clock sysvar
-    ///   9. `[]` Rent sysvar
-    ///   10. '[]` Token program id
+    ///   8. `[writable]` Obligation token mint - uninitialized
+    ///   9. `[writable]` Obligation token output - uninitialized
+    ///   10 `[]` Obligation token owner
+    ///   11 `[]` Clock sysvar
+    ///   12 `[]` Rent sysvar
+    ///   13 '[]` Token program id
     Borrow {
         /// Amount of collateral to deposit
         collateral_amount: u64,
-        /// Authority of obligation info account
-        obligation_authority: Pubkey,
     },
 
     /// Repay loaned tokens to a reserve and receive collateral tokens. The obligation balance
-    /// will be recalculated for interest. Must be signed by obligation authority.
+    /// will be recalculated for interest.
     ///
     ///   0. `[writable]` Repay reserve account.
     ///   1. `[]` Withdraw reserve account.
     ///   1. `[]` Derived pool authority ($authority).
-    ///   3. `[writable]` Liquidity input SPL Token account, $authority can transfer $repay_amount
+    ///   3. `[writable]` Liquidity input SPL Token account, $authority can transfer $liquidity_amount
     ///   4. `[writable]` Liquidity reserve SPL Token account
     ///   5. `[writable]` Collateral reserve SPL Token account
     ///   6. `[writable]` Collateral output SPL Token account
     ///   7. `[writable]` Obligation - initialized
-    ///   8. `[signer]` Obligation authority
-    ///   9. `[]` Clock sysvar
-    ///   10 `[]` Token program id
+    ///   8. `[writable]` Obligation token mint, $authority can transfer calculated amount
+    ///   9. `[writable]` Obligation token input
+    ///   10. `[]` Clock sysvar
+    ///   11. `[]` Token program id
     Repay {
         /// Amount of loan to repay
-        repay_amount: u64,
+        liquidity_amount: u64,
     },
 
     /// Set the market price of a reserve pool from DEX market accounts.
@@ -132,16 +134,12 @@ impl LendingInstruction {
                 Self::Withdraw { amount }
             }
             4 => {
-                let (collateral_amount, rest) = Self::unpack_u64(rest)?;
-                let (obligation_authority, _rest) = Self::unpack_pubkey(rest)?;
-                Self::Borrow {
-                    collateral_amount,
-                    obligation_authority,
-                }
+                let (collateral_amount, _rest) = Self::unpack_u64(rest)?;
+                Self::Borrow { collateral_amount }
             }
             5 => {
-                let (repay_amount, _rest) = Self::unpack_u64(rest)?;
-                Self::Repay { repay_amount }
+                let (liquidity_amount, _rest) = Self::unpack_u64(rest)?;
+                Self::Repay { liquidity_amount }
             }
             6 => Self::SetPrice,
             _ => return Err(LendingError::InvalidInstruction.into()),
@@ -157,16 +155,6 @@ impl LendingInstruction {
                 .map(u64::from_le_bytes)
                 .ok_or(LendingError::InvalidInstruction)?;
             Ok((amount, rest))
-        } else {
-            Err(LendingError::InvalidInstruction.into())
-        }
-    }
-
-    fn unpack_pubkey(input: &[u8]) -> Result<(Pubkey, &[u8]), ProgramError> {
-        if input.len() >= 32 {
-            let (key, rest) = input.split_at(32);
-            let pk = Pubkey::new(key);
-            Ok((pk, rest))
         } else {
             Err(LendingError::InvalidInstruction.into())
         }
@@ -190,17 +178,13 @@ impl LendingInstruction {
                 buf.push(3);
                 buf.extend_from_slice(&amount.to_le_bytes());
             }
-            Self::Borrow {
-                collateral_amount,
-                obligation_authority,
-            } => {
+            Self::Borrow { collateral_amount } => {
                 buf.push(4);
                 buf.extend_from_slice(&collateral_amount.to_le_bytes());
-                buf.extend_from_slice(obligation_authority.as_ref());
             }
-            Self::Repay { repay_amount } => {
+            Self::Repay { liquidity_amount } => {
                 buf.push(5);
-                buf.extend_from_slice(&repay_amount.to_le_bytes());
+                buf.extend_from_slice(&liquidity_amount.to_le_bytes());
             }
             Self::SetPrice => {
                 buf.push(6);
@@ -325,7 +309,9 @@ pub fn borrow(
     collateral_reserve_pubkey: Pubkey,
     collateral_amount: u64,
     obligation_pubkey: Pubkey,
-    obligation_authority: Pubkey,
+    obligation_token_mint_pubkey: Pubkey,
+    obligation_token_output_pubkey: Pubkey,
+    obligation_token_owner_pubkey: Pubkey,
 ) -> Instruction {
     Instruction {
         program_id,
@@ -338,15 +324,14 @@ pub fn borrow(
             AccountMeta::new(collateral_input_pubkey, false),
             AccountMeta::new(collateral_reserve_pubkey, false),
             AccountMeta::new(obligation_pubkey, false),
+            AccountMeta::new(obligation_token_mint_pubkey, false),
+            AccountMeta::new(obligation_token_output_pubkey, false),
+            AccountMeta::new_readonly(obligation_token_owner_pubkey, false),
             AccountMeta::new_readonly(sysvar::clock::id(), false),
             AccountMeta::new_readonly(sysvar::rent::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
-        data: LendingInstruction::Borrow {
-            collateral_amount,
-            obligation_authority,
-        }
-        .pack(),
+        data: LendingInstruction::Borrow { collateral_amount }.pack(),
     }
 }
 
@@ -359,11 +344,12 @@ pub fn repay(
     pool_authority_pubkey: Pubkey,
     liquidity_input_pubkey: Pubkey,
     liquidity_reserve_pubkey: Pubkey,
+    liquidity_amount: u64,
     collateral_reserve_pubkey: Pubkey,
     collateral_output_pubkey: Pubkey,
-    repay_amount: u64,
     obligation_pubkey: Pubkey,
-    obligation_authority: Pubkey,
+    obligation_mint_pubkey: Pubkey,
+    obligation_output_pubkey: Pubkey,
 ) -> Instruction {
     Instruction {
         program_id,
@@ -376,11 +362,12 @@ pub fn repay(
             AccountMeta::new(collateral_reserve_pubkey, false),
             AccountMeta::new(collateral_output_pubkey, false),
             AccountMeta::new(obligation_pubkey, false),
-            AccountMeta::new_readonly(obligation_authority, true),
+            AccountMeta::new(obligation_mint_pubkey, false),
+            AccountMeta::new(obligation_output_pubkey, false),
             AccountMeta::new_readonly(sysvar::clock::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
-        data: LendingInstruction::Repay { repay_amount }.pack(),
+        data: LendingInstruction::Repay { liquidity_amount }.pack(),
     }
 }
 

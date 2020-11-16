@@ -106,15 +106,32 @@ impl TestPool {
         deposit_reserve: &TestReserve,
         borrow_reserve: &TestReserve,
         amount: u64,
-    ) -> Pubkey {
+        obligation_token_owner: Pubkey,
+    ) -> TestObligation {
         let rent = banks_client.get_rent().await.unwrap();
         let obligation_keypair = Keypair::new();
-        let obligation_pubkey = obligation_keypair.pubkey();
+        let obligation_token_mint_keypair = Keypair::new();
+        let obligation_token_account_keypair = Keypair::new();
+
         let mut transaction = Transaction::new_with_payer(
             &[
                 create_account(
                     &payer.pubkey(),
-                    &obligation_pubkey,
+                    &obligation_token_mint_keypair.pubkey(),
+                    rent.minimum_balance(Mint::LEN),
+                    Mint::LEN as u64,
+                    &spl_token::id(),
+                ),
+                create_account(
+                    &payer.pubkey(),
+                    &obligation_token_account_keypair.pubkey(),
+                    rent.minimum_balance(Token::LEN),
+                    Token::LEN as u64,
+                    &spl_token::id(),
+                ),
+                create_account(
+                    &payer.pubkey(),
+                    &obligation_keypair.pubkey(),
                     rent.minimum_balance(ObligationInfo::LEN),
                     ObligationInfo::LEN as u64,
                     &spl_token_lending::id(),
@@ -129,18 +146,32 @@ impl TestPool {
                     deposit_reserve.user_collateral_token_pubkey,
                     deposit_reserve.collateral_reserve_pubkey,
                     amount,
-                    obligation_pubkey,
-                    payer.pubkey(),
+                    obligation_keypair.pubkey(),
+                    obligation_token_mint_keypair.pubkey(),
+                    obligation_token_account_keypair.pubkey(),
+                    obligation_token_owner,
                 ),
             ],
             Some(&payer.pubkey()),
         );
 
         let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
-        transaction.sign(&[&payer, &obligation_keypair], recent_blockhash);
+        transaction.sign(
+            &[
+                payer,
+                &obligation_keypair,
+                &obligation_token_account_keypair,
+                &obligation_token_mint_keypair,
+            ],
+            recent_blockhash,
+        );
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
-        obligation_pubkey
+        TestObligation {
+            pubkey: obligation_keypair.pubkey(),
+            token_mint: obligation_token_mint_keypair.pubkey(),
+            token_account: obligation_token_account_keypair.pubkey(),
+        }
     }
 
     pub async fn get_info(&self, banks_client: &mut BanksClient) -> PoolInfo {
@@ -150,6 +181,23 @@ impl TestPool {
             .unwrap()
             .unwrap();
         PoolInfo::unpack(&pool_account.data[..]).unwrap()
+    }
+}
+
+pub struct TestObligation {
+    pub pubkey: Pubkey,
+    pub token_mint: Pubkey,
+    pub token_account: Pubkey,
+}
+
+impl TestObligation {
+    pub async fn get_info(&self, banks_client: &mut BanksClient) -> ObligationInfo {
+        let obligation_account: Account = banks_client
+            .get_account(self.pubkey)
+            .await
+            .unwrap()
+            .unwrap();
+        ObligationInfo::unpack(&obligation_account.data[..]).unwrap()
     }
 }
 

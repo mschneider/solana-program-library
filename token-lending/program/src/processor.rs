@@ -14,13 +14,14 @@ use solana_program::{
     decode_error::DecodeError,
     entrypoint::ProgramResult,
     info,
-    program::invoke_signed,
+    program::{invoke, invoke_signed},
     program_error::{PrintProgramError, ProgramError},
     program_option::COption,
     program_pack::{IsInitialized, Pack},
     pubkey::Pubkey,
     sysvar::{clock::Clock, rent::Rent, Sysvar},
 };
+use spl_token::state::{Account as Token, Mint};
 use std::cell::RefMut;
 
 /// Processes an instruction
@@ -47,19 +48,13 @@ pub fn process_instruction(
             info!("Instruction: Withdraw");
             process_withdraw(program_id, amount, accounts)
         }
-        LendingInstruction::Borrow {
-            collateral_amount,
-            obligation_authority,
-        } => {
+        LendingInstruction::Borrow { collateral_amount } => {
             info!("Instruction: Borrow");
-            process_borrow(
-                program_id,
-                collateral_amount,
-                obligation_authority,
-                accounts,
-            )
+            process_borrow(program_id, collateral_amount, accounts)
         }
-        LendingInstruction::Repay { repay_amount } => {
+        LendingInstruction::Repay {
+            liquidity_amount: repay_amount,
+        } => {
             info!("Instruction: Repay");
             process_repay(program_id, repay_amount, accounts)
         }
@@ -257,7 +252,7 @@ fn process_deposit(program_id: &Pubkey, amount: u64, accounts: &[AccountInfo]) -
         return Err(LendingError::InvalidInput.into());
     }
 
-    token_transfer(TokenTransferParams {
+    spl_token_transfer(TokenTransferParams {
         source: liquidity_input_info.clone(),
         destination: liquidity_reserve_info.clone(),
         amount,
@@ -270,7 +265,7 @@ fn process_deposit(program_id: &Pubkey, amount: u64, accounts: &[AccountInfo]) -
     // TODO: update reserve
     // TODO: calculate exchange rate
 
-    token_mint_to(TokenMintToParams {
+    spl_token_mint_to(TokenMintToParams {
         mint: collateral_mint_info.clone(),
         destination: collateral_output_info.clone(),
         amount,
@@ -324,7 +319,7 @@ fn process_withdraw(
         reserve.collateral_exchange_rate(clock, reserve_token, liquidity_mint)?;
     let withdraw_amount: Decimal = collateral_exchange_rate * Decimal::from(collateral_amount);
 
-    token_transfer(TokenTransferParams {
+    spl_token_transfer(TokenTransferParams {
         source: liquidity_reserve_info.clone(),
         destination: liquidity_output_info.clone(),
         amount: withdraw_amount.round_u64(),
@@ -334,7 +329,7 @@ fn process_withdraw(
         token_program: token_program_id.clone(),
     })?;
 
-    token_burn(TokenBurnParams {
+    spl_token_burn(TokenBurnParams {
         mint: collateral_mint_info.clone(),
         source: collateral_input_info.clone(),
         amount: collateral_amount,
@@ -353,7 +348,6 @@ fn process_withdraw(
 fn process_borrow(
     program_id: &Pubkey,
     collateral_amount: u64,
-    obligation_authority: Pubkey,
     accounts: &[AccountInfo],
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
@@ -365,8 +359,12 @@ fn process_borrow(
     let collateral_input_info = next_account_info(account_info_iter)?;
     let collateral_reserve_info = next_account_info(account_info_iter)?;
     let obligation_info = next_account_info(account_info_iter)?;
+    let obligation_token_mint_info = next_account_info(account_info_iter)?;
+    let obligation_token_output_info = next_account_info(account_info_iter)?;
+    let obligation_token_owner_info = next_account_info(account_info_iter)?;
     let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
-    let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
+    let rent_info = next_account_info(account_info_iter)?;
+    let rent = &Rent::from_account_info(rent_info)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
     let obligation = ObligationInfo::unpack_unchecked(&obligation_info.data.borrow())?;
@@ -395,7 +393,7 @@ fn process_borrow(
     let pool_key = deposit_reserve.pool;
     let bump_seed = find_authority_bump_seed(program_id, &pool_key);
 
-    token_transfer(TokenTransferParams {
+    spl_token_transfer(TokenTransferParams {
         source: collateral_input_info.clone(),
         destination: collateral_reserve_info.clone(),
         amount: collateral_amount,
@@ -410,7 +408,7 @@ fn process_borrow(
     let collateral_value: Decimal = Decimal::from(collateral_amount) * deposit_token_price;
     let borrow_amount: Decimal = collateral_value / borrow_token_price;
 
-    token_transfer(TokenTransferParams {
+    spl_token_transfer(TokenTransferParams {
         source: liquidity_reserve_info.clone(),
         destination: liquidity_output_info.clone(),
         amount: borrow_amount.round_u64(),
@@ -425,15 +423,54 @@ fn process_borrow(
     borrow_reserve.add_borrow(borrow_amount);
     ReserveInfo::pack(borrow_reserve, &mut borrow_reserve_info.data.borrow_mut())?;
 
+    if obligation_token_mint_info.owner != token_program_id.key {
+        return Err(LendingError::InvalidTokenProgram.into());
+    }
+    if obligation_token_output_info.owner != token_program_id.key {
+        return Err(LendingError::InvalidTokenProgram.into());
+    }
+
+    let debt_mint = Mint::unpack_unchecked(&obligation_token_mint_info.data.borrow())?;
+    let debt_output = Token::unpack_unchecked(&obligation_token_output_info.data.borrow())?;
+    if debt_mint.is_initialized() || debt_output.is_initialized() {
+        return Err(LendingError::AlreadyInUse.into());
+    }
+
+    let pool_authority = &authority_id(program_id, &deposit_reserve.pool, bump_seed)?;
+    spl_token_init_mint(TokenInitializeMintParams {
+        mint: obligation_token_mint_info.clone(),
+        authority: pool_authority,
+        rent: rent_info.clone(),
+        token_program: token_program_id.clone(),
+    })?;
+
+    spl_token_init_account(TokenInitializeAccountParams {
+        account: obligation_token_output_info.clone(),
+        mint: obligation_token_mint_info.clone(),
+        owner: obligation_token_owner_info.clone(),
+        rent: rent_info.clone(),
+        token_program: token_program_id.clone(),
+    })?;
+
+    spl_token_mint_to(TokenMintToParams {
+        mint: obligation_token_mint_info.clone(),
+        destination: obligation_token_output_info.clone(),
+        amount: collateral_amount,
+        authority: pool_authority_info.clone(),
+        authorized: &deposit_reserve.pool,
+        bump_seed,
+        token_program: token_program_id.clone(),
+    })?;
+
     ObligationInfo::pack(
         ObligationInfo {
             last_update_slot: clock.slot,
-            authority: obligation_authority,
             collateral_amount,
             collateral_reserve: *deposit_reserve_info.key,
             cumulative_borrow_rate,
             borrow_amount,
             borrow_reserve: *borrow_reserve_info.key,
+            token_mint: *obligation_token_mint_info.key,
         },
         &mut obligation_info.data.borrow_mut(),
     )?;
@@ -444,7 +481,7 @@ fn process_borrow(
 #[inline(never)] // avoid stack frame limit
 fn process_repay(
     program_id: &Pubkey,
-    repay_amount: u64,
+    liquidity_amount: u64,
     accounts: &[AccountInfo],
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
@@ -456,12 +493,13 @@ fn process_repay(
     let collateral_reserve_info = next_account_info(account_info_iter)?;
     let collateral_output_info = next_account_info(account_info_iter)?;
     let obligation_info = next_account_info(account_info_iter)?;
-    let obligation_authority = next_account_info(account_info_iter)?;
+    let obligation_mint_info = next_account_info(account_info_iter)?;
+    let obligation_input_info = next_account_info(account_info_iter)?;
     let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
     let mut obligation = ObligationInfo::unpack(&obligation_info.data.borrow())?;
-    if !obligation_authority.is_signer || &obligation.authority != obligation_authority.key {
+    if &obligation.token_mint != obligation_mint_info.key {
         return Err(LendingError::InvalidInput.into());
     }
     if &obligation.borrow_reserve != repay_reserve_info.key {
@@ -491,18 +529,21 @@ fn process_repay(
     obligation.accrue_interest(clock, &repay_reserve)?;
 
     let borrowed_amount = obligation.borrow_amount.round_u64();
-    let repay_amount = repay_amount.min(borrowed_amount);
-    let collateral_withdraw_amount = if repay_amount == borrowed_amount {
-        obligation.collateral_amount
-    } else if repay_amount == 0 {
-        0
-    } else {
-        let withdraw_amount =
-            Decimal::from(obligation.collateral_amount * repay_amount) / obligation.borrow_amount;
+    let repay_amount = liquidity_amount.min(borrowed_amount);
+    let repay_pct: Decimal = Decimal::from(repay_amount) / obligation.borrow_amount;
+
+    let collateral_withdraw_amount = {
+        let withdraw_amount: Decimal = repay_pct * Decimal::from(obligation.collateral_amount);
         withdraw_amount.round_u64()
     };
 
-    token_transfer(TokenTransferParams {
+    let obligation_token_amount = {
+        let obligation_mint = &unpack_mint(&obligation_mint_info.data.borrow())?;
+        let token_amount: Decimal = repay_pct * Decimal::from(obligation_mint.supply);
+        token_amount.round_u64()
+    };
+
+    spl_token_transfer(TokenTransferParams {
         source: liquidity_input_info.clone(),
         destination: liquidity_reserve_info.clone(),
         amount: repay_amount,
@@ -512,12 +553,22 @@ fn process_repay(
         token_program: token_program_id.clone(),
     })?;
 
-    token_transfer(TokenTransferParams {
+    spl_token_transfer(TokenTransferParams {
         source: collateral_reserve_info.clone(),
         destination: collateral_output_info.clone(),
         amount: collateral_withdraw_amount,
         authority: pool_authority_info.clone(),
         authorized: &pool_key,
+        bump_seed,
+        token_program: token_program_id.clone(),
+    })?;
+
+    spl_token_burn(TokenBurnParams {
+        mint: obligation_mint_info.clone(),
+        source: obligation_input_info.clone(),
+        authority: pool_authority_info.clone(),
+        authorized: &pool_key,
+        amount: obligation_token_amount,
         bump_seed,
         token_program: token_program_id.clone(),
     })?;
@@ -657,8 +708,47 @@ fn authority_id(
         .or(Err(LendingError::InvalidProgramAddress))
 }
 
+/// Issue a spl_token `InitializeMint` instruction.
+fn spl_token_init_mint(params: TokenInitializeMintParams<'_, '_>) -> ProgramResult {
+    let TokenInitializeMintParams {
+        mint,
+        rent,
+        authority,
+        token_program,
+    } = params;
+    let ix =
+        spl_token::instruction::initialize_mint(token_program.key, mint.key, authority, None, 0)?;
+    let result = invoke(&ix, &[mint, rent, token_program]);
+    result.map_err(|err| {
+        err.print::<spl_token::error::TokenError>();
+        LendingError::TokenInitializeMintFailed.into()
+    })
+}
+
+/// Issue a spl_token `InitializeAccount` instruction.
+fn spl_token_init_account(params: TokenInitializeAccountParams<'_>) -> ProgramResult {
+    let TokenInitializeAccountParams {
+        account,
+        mint,
+        owner,
+        rent,
+        token_program,
+    } = params;
+    let ix = spl_token::instruction::initialize_account(
+        token_program.key,
+        account.key,
+        mint.key,
+        owner.key,
+    )?;
+    let result = invoke(&ix, &[account, mint, owner, rent, token_program]);
+    result.map_err(|err| {
+        err.print::<spl_token::error::TokenError>();
+        LendingError::TokenInitializeAccountFailed.into()
+    })
+}
+
 /// Issue a spl_token `Transfer` instruction.
-fn token_transfer(params: TokenTransferParams<'_, '_>) -> ProgramResult {
+fn spl_token_transfer(params: TokenTransferParams<'_, '_>) -> ProgramResult {
     let authorized_bytes = params.authorized.to_bytes();
     let authority_signer_seeds = [&authorized_bytes[..32], &[params.bump_seed]];
     let TokenTransferParams {
@@ -682,16 +772,14 @@ fn token_transfer(params: TokenTransferParams<'_, '_>) -> ProgramResult {
         &[source, destination, authority, token_program],
         &[&authority_signer_seeds],
     );
-    if let Err(err) = result {
+    result.map_err(|err| {
         err.print::<spl_token::error::TokenError>();
-        Err(LendingError::TokenTransferFailed.into())
-    } else {
-        Ok(())
-    }
+        LendingError::TokenTransferFailed.into()
+    })
 }
 
 /// Issue a spl_token `MintTo` instruction.
-fn token_mint_to(params: TokenMintToParams<'_, '_>) -> ProgramResult {
+fn spl_token_mint_to(params: TokenMintToParams<'_, '_>) -> ProgramResult {
     let authorized_bytes = params.authorized.to_bytes();
     let authority_signer_seeds = [&authorized_bytes[..32], &[params.bump_seed]];
     let TokenMintToParams {
@@ -715,16 +803,14 @@ fn token_mint_to(params: TokenMintToParams<'_, '_>) -> ProgramResult {
         &[mint, destination, authority, token_program],
         &[&authority_signer_seeds],
     );
-    if let Err(err) = result {
+    result.map_err(|err| {
         err.print::<spl_token::error::TokenError>();
-        Err(LendingError::TokenMintToFailed.into())
-    } else {
-        Ok(())
-    }
+        LendingError::TokenMintToFailed.into()
+    })
 }
 
 /// Issue a spl_token `Burn` instruction.
-fn token_burn(params: TokenBurnParams<'_, '_>) -> ProgramResult {
+fn spl_token_burn(params: TokenBurnParams<'_, '_>) -> ProgramResult {
     let authorized_bytes = params.authorized.to_bytes();
     let authority_signer_seeds = [&authorized_bytes[..32], &[params.bump_seed]];
     let TokenBurnParams {
@@ -748,12 +834,25 @@ fn token_burn(params: TokenBurnParams<'_, '_>) -> ProgramResult {
         &[source, mint, authority, token_program],
         &[&authority_signer_seeds],
     );
-    if let Err(err) = result {
+    result.map_err(|err| {
         err.print::<spl_token::error::TokenError>();
-        Err(LendingError::TokenBurnFailed.into())
-    } else {
-        Ok(())
-    }
+        LendingError::TokenBurnFailed.into()
+    })
+}
+
+struct TokenInitializeMintParams<'a: 'b, 'b> {
+    mint: AccountInfo<'a>,
+    rent: AccountInfo<'a>,
+    authority: &'b Pubkey,
+    token_program: AccountInfo<'a>,
+}
+
+struct TokenInitializeAccountParams<'a> {
+    account: AccountInfo<'a>,
+    mint: AccountInfo<'a>,
+    owner: AccountInfo<'a>,
+    rent: AccountInfo<'a>,
+    token_program: AccountInfo<'a>,
 }
 
 struct TokenTransferParams<'a: 'b, 'b> {
