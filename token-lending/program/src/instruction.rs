@@ -45,7 +45,8 @@ pub enum LendingInstruction {
     ///   3. `[writable]` Liquidity supply SPL Token account.
     ///   4. `[writable]` Collateral output SPL Token account,
     ///   5. `[writable]` Collateral SPL Token mint.
-    ///   6. '[]` Token program id
+    ///   6. `[]` Clock sysvar
+    ///   7. '[]` Token program id
     DepositReserveLiquidity {
         /// Amount to deposit into the reserve
         liquidity_amount: u64,
@@ -274,6 +275,7 @@ pub fn deposit_reserve_liquidity(
             AccountMeta::new(liquidity_supply_pubkey, false),
             AccountMeta::new(collateral_output_pubkey, false),
             AccountMeta::new(collateral_mint_pubkey, false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
         data: LendingInstruction::DepositReserveLiquidity { liquidity_amount }.pack(),

@@ -6,7 +6,10 @@ use solana_program::{program_option::COption, program_pack::Pack};
 use solana_program_test::*;
 use solana_sdk::{signature::Signer, transaction::Transaction};
 use spl_token::state::Account as Token;
-use spl_token_lending::{instruction::repay_reserve_liquidity, state::SLOTS_PER_YEAR};
+use spl_token_lending::{
+    instruction::repay_reserve_liquidity,
+    state::{INITIAL_COLLATERAL_RATE, SLOTS_PER_YEAR},
+};
 
 #[tokio::test]
 async fn test_transaction() {
@@ -119,7 +122,7 @@ async fn test_transaction() {
         .unwrap();
     let user_sol_collateral = Token::unpack(&user_sol_collateral_account.data[..]).unwrap();
     assert_eq!(user_sol.amount, 0);
-    assert_eq!(user_sol_collateral.amount, 2000);
+    assert_eq!(user_sol_collateral.amount, INITIAL_COLLATERAL_RATE * 2000);
 
     let obligation = lending_market
         .borrow(

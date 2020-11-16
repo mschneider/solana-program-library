@@ -184,10 +184,26 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         token_program: token_program_id.clone(),
     })?;
 
+    let mut new_reserve: ReserveInfo = assert_uninitialized(reserve_info)?;
+    new_reserve.is_initialized = true;
+    new_reserve.lending_market = *lending_market_info.key;
+    new_reserve.liquidity_supply = *liquidity_supply_info.key;
+    new_reserve.collateral_supply = *collateral_supply_info.key;
+    new_reserve.collateral_mint = *collateral_mint_info.key;
+
+    let collateral_amount: Decimal = {
+        let liquidity_supply = &unpack_token_account(&liquidity_supply_info.data.borrow())?;
+        let collateral_mint = &unpack_mint(&collateral_mint_info.data.borrow())?;
+        new_reserve.update_cumulative_rate(clock, &liquidity_supply);
+        let collateral_over_liquidity_rate =
+            new_reserve.collateral_over_liquidity_rate(clock, liquidity_supply, collateral_mint)?;
+        collateral_over_liquidity_rate * Decimal::from(liquidity_supply.amount)
+    };
+
     spl_token_mint_to(TokenMintToParams {
         mint: collateral_mint_info.clone(),
         destination: collateral_output_info.clone(),
-        amount: liquidity_supply.amount, // TODO exchange rate
+        amount: collateral_amount.round_u64(),
         authority: lending_market_authority_info.clone(),
         authorized: lending_market_info.key,
         bump_seed,
@@ -229,14 +245,7 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         COption::None
     };
 
-    let mut new_reserve: ReserveInfo = assert_uninitialized(reserve_info)?;
-    new_reserve.is_initialized = true;
-    new_reserve.lending_market = *lending_market_info.key;
-    new_reserve.liquidity_supply = *liquidity_supply_info.key;
-    new_reserve.collateral_supply = *collateral_supply_info.key;
-    new_reserve.collateral_mint = *collateral_mint_info.key;
     new_reserve.dex_market = dex_market;
-    new_reserve.update_cumulative_rate(clock, &liquidity_supply);
     ReserveInfo::pack(new_reserve, &mut reserve_info.data.borrow_mut())?;
 
     Ok(())
@@ -254,9 +263,10 @@ fn process_deposit(
     let liquidity_supply_info = next_account_info(account_info_iter)?;
     let collateral_output_info = next_account_info(account_info_iter)?;
     let collateral_mint_info = next_account_info(account_info_iter)?;
+    let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
-    let reserve = ReserveInfo::unpack(&reserve_info.data.borrow())?;
+    let mut reserve = ReserveInfo::unpack(&reserve_info.data.borrow())?;
     let bump_seed = find_authority_bump_seed(program_id, &reserve.lending_market);
     if lending_market_authority_info.key
         != &authority_id(program_id, &reserve.lending_market, bump_seed)?
@@ -276,6 +286,14 @@ fn process_deposit(
         return Err(LendingError::InvalidInput.into());
     }
 
+    let liquidity_supply = &unpack_token_account(&liquidity_supply_info.data.borrow())?;
+    let collateral_mint = &unpack_mint(&collateral_mint_info.data.borrow())?;
+    reserve.update_cumulative_rate(clock, liquidity_supply);
+    let collateral_over_liquidity_rate =
+        reserve.collateral_over_liquidity_rate(clock, liquidity_supply, collateral_mint)?;
+    let collateral_amount: Decimal =
+        collateral_over_liquidity_rate * Decimal::from(liquidity_amount);
+
     spl_token_transfer(TokenTransferParams {
         source: liquidity_input_info.clone(),
         destination: liquidity_supply_info.clone(),
@@ -286,13 +304,10 @@ fn process_deposit(
         token_program: token_program_id.clone(),
     })?;
 
-    // TODO: update reserve
-    // TODO: calculate exchange rate
-
     spl_token_mint_to(TokenMintToParams {
         mint: collateral_mint_info.clone(),
         destination: collateral_output_info.clone(),
-        amount: liquidity_amount,
+        amount: collateral_amount.round_u64(),
         authority: lending_market_authority_info.clone(),
         authorized: &reserve.lending_market,
         bump_seed,
@@ -338,17 +353,18 @@ fn process_withdraw(
     }
 
     let liquidity_supply = &unpack_token_account(&liquidity_supply_info.data.borrow())?;
-    let liquidity_mint = &unpack_mint(&collateral_mint_info.data.borrow())?;
+    let collateral_mint = &unpack_mint(&collateral_mint_info.data.borrow())?;
 
     reserve.update_cumulative_rate(clock, liquidity_supply);
-    let collateral_exchange_rate =
-        reserve.collateral_exchange_rate(clock, liquidity_supply, liquidity_mint)?;
-    let withdraw_amount: Decimal = collateral_exchange_rate * Decimal::from(collateral_amount);
+    let collateral_over_liquidity_rate =
+        reserve.collateral_over_liquidity_rate(clock, liquidity_supply, collateral_mint)?;
+    let liquidity_withdraw_amount: Decimal =
+        Decimal::from(collateral_amount) / collateral_over_liquidity_rate;
 
     spl_token_transfer(TokenTransferParams {
         source: liquidity_supply_info.clone(),
         destination: liquidity_output_info.clone(),
-        amount: withdraw_amount.round_u64(),
+        amount: liquidity_withdraw_amount.round_u64(),
         authority: lending_market_authority_info.clone(),
         authorized: &reserve.lending_market,
         bump_seed,

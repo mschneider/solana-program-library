@@ -16,6 +16,9 @@ use spl_token::state::{Account as TokenAccount, Mint};
 /// Prices are only valid for a few slots before needing to be updated again
 const PRICE_EXPIRATION_SLOTS: u64 = 5;
 
+/// Collateral tokens are initially valued at a ratio of 5:1 (collateral:liquidity)
+pub const INITIAL_COLLATERAL_RATE: u64 = 5;
+
 /// Number of slots per year
 pub const SLOTS_PER_YEAR: u64 =
     DEFAULT_TICKS_PER_SECOND / DEFAULT_TICKS_PER_SLOT * SECONDS_PER_DAY * 365;
@@ -92,10 +95,13 @@ impl ReserveInfo {
         clock: &Clock,
         liquidity_supply: &TokenAccount,
     ) -> Decimal {
+        let total_liquidity = Decimal::from(liquidity_supply.amount);
+        let total_supply = self.total_borrows + total_liquidity;
+
         if self.borrow_state_update_slot == 0 {
             self.borrow_state_update_slot = clock.slot;
             self.cumulative_borrow_rate = Decimal::from(1u64);
-        } else if self.total_borrows == Decimal::from(0u64) {
+        } else if total_supply == Decimal::from(0u64) {
             self.borrow_state_update_slot = clock.slot;
         } else {
             // Optimize for this utilization rate for stable coins
@@ -105,9 +111,7 @@ impl ReserveInfo {
             let base_borrow_rate = Decimal::new(0, 2);
             let max_borrow_rate = Decimal::new(30, 2);
 
-            let total_liquidity = Decimal::from(liquidity_supply.amount);
-            let utilization_rate: Decimal =
-                self.total_borrows / (self.total_borrows + total_liquidity);
+            let utilization_rate: Decimal = self.total_borrows / total_supply;
             let borrow_rate: Decimal = if utilization_rate < optimal_utilization_rate {
                 // 50% should be normalized to 5/8 of the way to the optimal borrow rate
                 let normalized_rate = utilization_rate / optimal_utilization_rate;
@@ -133,7 +137,7 @@ impl ReserveInfo {
     }
 
     /// Return the current collateral exchange rate.
-    pub fn collateral_exchange_rate(
+    pub fn collateral_over_liquidity_rate(
         &self,
         clock: &Clock,
         liquidity_supply: &TokenAccount,
@@ -141,13 +145,16 @@ impl ReserveInfo {
     ) -> Result<Decimal, ProgramError> {
         // TODO: is exchange rate fixed within a slot?
         if self.borrow_state_update_slot != clock.slot {
-            info!("exchange rate needs to be updated");
+            info!("collateral exchange rate needs to be updated");
             Err(LendingError::InvalidInput.into())
+        } else if collateral_mint.supply == 0 {
+            Ok(Decimal::from(INITIAL_COLLATERAL_RATE))
         } else {
-            Ok(
-                (self.total_borrows + Decimal::from(liquidity_supply.amount))
-                    / Decimal::from(collateral_mint.supply),
-            )
+            let collateral_supply = Decimal::from(collateral_mint.supply);
+            let liquidity_supply = Decimal::from(liquidity_supply.amount);
+            let collateral_over_liquidity_rate: Decimal =
+                collateral_supply / (self.total_borrows + liquidity_supply);
+            Ok(collateral_over_liquidity_rate)
         }
     }
 }
