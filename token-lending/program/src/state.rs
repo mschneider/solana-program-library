@@ -16,10 +16,6 @@ use spl_token::state::{Account as TokenAccount, Mint};
 /// Prices are only valid for a few slots before needing to be updated again
 const PRICE_EXPIRATION_SLOTS: u64 = 5;
 
-/// Maximum number of pool reserves
-pub const MAX_RESERVES: u8 = 10;
-const MAX_RESERVES_USIZE: usize = MAX_RESERVES as usize;
-
 /// Number of slots per year
 pub const SLOTS_PER_YEAR: u64 =
     DEFAULT_TICKS_PER_SECOND / DEFAULT_TICKS_PER_SLOT * SECONDS_PER_DAY * 365;
@@ -32,10 +28,6 @@ pub struct PoolInfo {
     pub is_initialized: bool,
     /// Quote currency token mint.
     pub quote_token_mint: Pubkey,
-    /// Number of active reserves.
-    pub num_reserves: u8,
-    /// List of reserves that belong to this pool.
-    pub reserves: Box<[Pubkey; MAX_RESERVES_USIZE]>,
 }
 
 /// Pool reserve state
@@ -288,48 +280,31 @@ impl IsInitialized for PoolInfo {
     }
 }
 
-const POOL_LEN: usize = 354;
+const POOL_LEN: usize = 33;
 impl Pack for PoolInfo {
-    const LEN: usize = 354;
+    const LEN: usize = 33;
 
     /// Unpacks a byte buffer into a [PoolInfo](struct.PoolInfo.html).
     fn unpack_from_slice(input: &[u8]) -> Result<Self, ProgramError> {
         let input = array_ref![input, 0, POOL_LEN];
         #[allow(clippy::ptr_offset_with_cast)]
-        let (is_initialized, quote_token_mint, num_reserves, reserves_flat) =
-            array_refs![input, 1, 32, 1, 32 * MAX_RESERVES_USIZE];
-        let mut pool = Self {
+        let (is_initialized, quote_token_mint) = array_refs![input, 1, 32];
+        Ok(Self {
             is_initialized: match is_initialized {
                 [0] => false,
                 [1] => true,
                 _ => return Err(ProgramError::InvalidAccountData),
             },
             quote_token_mint: Pubkey::new_from_array(*quote_token_mint),
-            num_reserves: num_reserves[0],
-            reserves: Box::new([Pubkey::new_from_array([0u8; 32]); MAX_RESERVES_USIZE]),
-        };
-        for (src, dst) in reserves_flat
-            .chunks(32)
-            .zip(pool.reserves.iter_mut())
-            .take(pool.num_reserves as usize)
-        {
-            *dst = Pubkey::new(src);
-        }
-        Ok(pool)
+        })
     }
 
     fn pack_into_slice(&self, output: &mut [u8]) {
         let output = array_mut_ref![output, 0, POOL_LEN];
         #[allow(clippy::ptr_offset_with_cast)]
-        let (is_initialized, quote_token_mint, num_reserves, reserves_flat) =
-            mut_array_refs![output, 1, 32, 1, 32 * MAX_RESERVES_USIZE];
+        let (is_initialized, quote_token_mint) = mut_array_refs![output, 1, 32];
         *is_initialized = [self.is_initialized as u8];
         quote_token_mint.copy_from_slice(self.quote_token_mint.as_ref());
-        *num_reserves = [self.num_reserves];
-        for (i, src) in self.reserves.iter().enumerate() {
-            let dst_array = array_mut_ref![reserves_flat, 32 * i, 32];
-            dst_array.copy_from_slice(src.as_ref());
-        }
     }
 }
 

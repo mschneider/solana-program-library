@@ -24,7 +24,7 @@ pub enum LendingInstruction {
     /// Initializes a new reserve.
     ///
     ///   0. `[writable]` Reserve account.
-    ///   1. `[writable]` Pool account.
+    ///   1. `[signer]` Pool account.
     ///   2. `[]` Liquidity reserve SPL Token account. Must NOT be empty, owned by pool authority
     ///   3. `[]` Collateral reserve SPL Token account. Must be empty, owned by pool authority, minted by collateral token mint.
     ///   4. `[]` Collateral SPL Token mint. Must be empty, owned by pool authority (TODO: must be uninitialized)
@@ -237,7 +237,7 @@ pub fn init_reserve(
 ) -> Instruction {
     let mut accounts = vec![
         AccountMeta::new(reserve_pubkey, false),
-        AccountMeta::new(pool_pubkey, false),
+        AccountMeta::new_readonly(pool_pubkey, true),
         AccountMeta::new_readonly(liquidity_reserve_pubkey, false),
         AccountMeta::new_readonly(collateral_reserve_pubkey, false),
         AccountMeta::new_readonly(collateral_mint_pubkey, false),

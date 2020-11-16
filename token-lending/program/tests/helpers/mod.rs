@@ -32,7 +32,7 @@ pub fn setup_test() -> (ProgramTest, TestMarket) {
 }
 
 pub struct TestPool {
-    pub pubkey: Pubkey,
+    pub keypair: Keypair,
     pub authority_pubkey: Pubkey,
 }
 
@@ -67,7 +67,7 @@ impl TestPool {
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
 
         TestPool {
-            pubkey,
+            keypair,
             authority_pubkey,
         }
     }
@@ -145,7 +145,7 @@ impl TestPool {
 
     pub async fn get_info(&self, banks_client: &mut BanksClient) -> PoolInfo {
         let pool_account: Account = banks_client
-            .get_account(self.pubkey)
+            .get_account(self.keypair.pubkey())
             .await
             .unwrap()
             .unwrap();
@@ -250,7 +250,7 @@ impl TestReserve {
                 init_reserve(
                     spl_token_lending::id(),
                     pubkey,
-                    pool.pubkey,
+                    pool.keypair.pubkey(),
                     liquidity_reserve_pubkey,
                     collateral_reserve_pubkey,
                     collateral_mint_pubkey,
@@ -261,7 +261,7 @@ impl TestReserve {
         );
 
         let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
-        transaction.sign(&[&payer, &keypair], recent_blockhash);
+        transaction.sign(&[&payer, &keypair, &pool.keypair], recent_blockhash);
 
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
 

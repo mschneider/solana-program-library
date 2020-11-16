@@ -2,7 +2,7 @@ mod helpers;
 
 use assert_matches::*;
 use helpers::*;
-use solana_program::{program_option::COption, program_pack::Pack, pubkey::Pubkey};
+use solana_program::{program_option::COption, program_pack::Pack};
 use solana_program_test::*;
 use solana_sdk::{account::Account, signature::Signer, transaction::Transaction};
 use spl_token::state::Account as Token;
@@ -23,11 +23,6 @@ async fn test_transaction() {
     let pool_info = pool.get_info(&mut banks_client).await;
     assert_eq!(pool_info.is_initialized, true);
     assert_eq!(pool_info.quote_token_mint, quote_token_mint);
-    assert_eq!(pool_info.num_reserves, 0);
-    let zeroed = Pubkey::new(&[0; 32]);
-    for reserve in &pool_info.reserves[..] {
-        assert_eq!(reserve, &zeroed);
-    }
 
     let usdc_reserve = TestReserve::init(
         &mut banks_client,
@@ -53,22 +48,10 @@ async fn test_transaction() {
     )
     .await;
 
-    // Verify Pool Account
-    let pool_info = pool.get_info(&mut banks_client).await;
-    assert_eq!(pool_info.is_initialized, true);
-    assert_eq!(pool_info.quote_token_mint, quote_token_mint);
-    assert_eq!(pool_info.num_reserves, 2);
-    assert_eq!(pool_info.reserves[0], usdc_reserve.pubkey);
-    assert_eq!(pool_info.reserves[1], sol_reserve.pubkey);
-    let zeroed = Pubkey::new(&[0; 32]);
-    for reserve in &pool_info.reserves[2..] {
-        assert_eq!(reserve, &zeroed);
-    }
-
     // Verify reserve Accounts
     let usdc_reserve_info = usdc_reserve.get_info(&mut banks_client).await;
     assert_eq!(usdc_reserve_info.is_initialized, true);
-    assert_eq!(usdc_reserve_info.pool, pool.pubkey);
+    assert_eq!(usdc_reserve_info.pool, pool.keypair.pubkey());
     assert_eq!(
         usdc_reserve_info.liquidity_reserve,
         usdc_reserve.liquidity_reserve_pubkey
@@ -91,7 +74,7 @@ async fn test_transaction() {
 
     let sol_reserve_info = sol_reserve.get_info(&mut banks_client).await;
     assert_eq!(sol_reserve_info.is_initialized, true);
-    assert_eq!(sol_reserve_info.pool, pool.pubkey);
+    assert_eq!(sol_reserve_info.pool, pool.keypair.pubkey());
     assert_eq!(
         sol_reserve_info.liquidity_reserve,
         sol_reserve.liquidity_reserve_pubkey

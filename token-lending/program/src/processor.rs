@@ -4,7 +4,7 @@ use crate::{
     error::LendingError,
     instruction::LendingInstruction,
     math::Decimal,
-    state::{ObligationInfo, PoolInfo, ReserveInfo, MAX_RESERVES},
+    state::{ObligationInfo, PoolInfo, ReserveInfo},
 };
 use arrayref::{array_refs, mut_array_refs};
 use num_traits::FromPrimitive;
@@ -118,13 +118,12 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         return Err(LendingError::NotRentExempt.into());
     }
 
-    let mut pool = PoolInfo::unpack(&pool_info.data.borrow())?;
-    if pool.num_reserves >= MAX_RESERVES {
-        return Err(LendingError::PoolFull.into());
-    }
-
+    let pool = PoolInfo::unpack(&pool_info.data.borrow())?;
     let bump_seed = find_authority_bump_seed(program_id, &pool_info.key);
     let authority = authority_id(program_id, pool_info.key, bump_seed)?;
+    if !pool_info.is_signer {
+        return Err(LendingError::InvalidInput.into());
+    }
 
     if liquidity_reserve_info.owner != token_program_id.key {
         return Err(LendingError::InvalidTokenProgram.into());
@@ -226,10 +225,6 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     reserve.dex_market = dex_market;
     reserve.update_cumulative_rate(clock, &liquidity_reserve);
     ReserveInfo::pack(reserve, &mut reserve_info.data.borrow_mut())?;
-
-    pool.reserves[pool.num_reserves as usize] = *reserve_info.key;
-    pool.num_reserves += 1;
-    PoolInfo::pack(pool, &mut pool_info.data.borrow_mut())?;
 
     Ok(())
 }
