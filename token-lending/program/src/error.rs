@@ -49,12 +49,9 @@ pub enum LendingError {
     /// Expected a Serum DEX market
     #[error("Input dex market account is not valid")]
     ExpectedDexMarket,
-    /// The reserve cannot be added a full pool
-    #[error("Cannot add reserve to full pool")]
-    PoolFull,
-    /// The reserve pools must be the same
-    #[error("Reserve pools do not match")]
-    PoolMismatch,
+    /// The reserve lending market must be the same
+    #[error("Reserve lending market mismatch")]
+    LendingMarketMismatch,
     /// Reserve price is not set
     #[error("Reserve price is not set")]
     ReservePriceUnset,

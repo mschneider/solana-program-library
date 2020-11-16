@@ -20,59 +20,59 @@ const PRICE_EXPIRATION_SLOTS: u64 = 5;
 pub const SLOTS_PER_YEAR: u64 =
     DEFAULT_TICKS_PER_SECOND / DEFAULT_TICKS_PER_SLOT * SECONDS_PER_DAY * 365;
 
-/// Lending pool state
+/// Lending market state
 #[repr(C)]
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PoolInfo {
+pub struct LendingMarketInfo {
     /// Initialized state.
     pub is_initialized: bool,
     /// Quote currency token mint.
     pub quote_token_mint: Pubkey,
 }
 
-/// Pool reserve state
+/// Lending market reserve state
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ReserveInfo {
     /// Initialized state.
     pub is_initialized: bool,
-    /// Pool address
-    pub pool: Pubkey,
-    /// Reserve liquidity
-    pub liquidity_reserve: Pubkey,
-    /// Reserve collateral
+    /// Lending market address
+    pub lending_market: Pubkey,
+    /// Reserve liquidity supply
+    pub liquidity_supply: Pubkey,
+    /// Reserve collateral supply
     /// Collateral is stored rather than burned to keep an accurate total collateral supply
-    pub collateral_reserve: Pubkey,
+    pub collateral_supply: Pubkey,
     /// Collateral tokens are minted when liquidity is deposited in the reserve.
     /// Collateral tokens can be withdrawn back to the underlying liquidity token.
     pub collateral_mint: Pubkey,
-    /// DEX market state account
-    pub dex_market: COption<Pubkey>,
 
-    /// Latest market price
-    pub market_price: u64,
-    /// DEX market state account
-    pub market_price_updated_slot: u64,
+    /// Dex market state account
+    pub dex_market: COption<Pubkey>,
+    /// Dex market price
+    pub dex_market_price: u64,
+    /// Dex market price last updated
+    pub dex_market_price_updated_slot: u64,
 
     /// Cumulative borrow rate
     cumulative_borrow_rate: Decimal,
     /// Total borrows, plus interest
     total_borrows: Decimal,
     /// Last slot when borrow state was updated
-    pub last_update_slot: u64,
+    pub borrow_state_update_slot: u64,
 }
 
 impl ReserveInfo {
     /// Fetch the current market price
-    pub fn current_market_price(&self, clock: &Clock) -> Result<u64, ProgramError> {
+    pub fn current_dex_market_price(&self, clock: &Clock) -> Result<u64, ProgramError> {
         if self.dex_market.is_none() {
             Ok(1) // TODO: need decimals?
-        } else if self.market_price_updated_slot == 0 {
+        } else if self.dex_market_price_updated_slot == 0 {
             Err(LendingError::ReservePriceUnset.into())
-        } else if self.market_price_updated_slot + PRICE_EXPIRATION_SLOTS <= clock.slot {
+        } else if self.dex_market_price_updated_slot + PRICE_EXPIRATION_SLOTS <= clock.slot {
             Err(LendingError::ReservePriceExpired.into())
         } else {
-            Ok(self.market_price)
+            Ok(self.dex_market_price)
         }
     }
 
@@ -90,13 +90,13 @@ impl ReserveInfo {
     pub fn update_cumulative_rate(
         &mut self,
         clock: &Clock,
-        reserve_token: &TokenAccount,
+        liquidity_supply: &TokenAccount,
     ) -> Decimal {
-        if self.last_update_slot == 0 {
-            self.last_update_slot = clock.slot;
+        if self.borrow_state_update_slot == 0 {
+            self.borrow_state_update_slot = clock.slot;
             self.cumulative_borrow_rate = Decimal::from(1u64);
         } else if self.total_borrows == Decimal::from(0u64) {
-            self.last_update_slot = clock.slot;
+            self.borrow_state_update_slot = clock.slot;
         } else {
             // Optimize for this utilization rate for stable coins
             //  increase borrow rate multiplier when utilization is higher
@@ -105,7 +105,7 @@ impl ReserveInfo {
             let base_borrow_rate = Decimal::new(0, 2);
             let max_borrow_rate = Decimal::new(30, 2);
 
-            let total_liquidity = Decimal::from(reserve_token.amount);
+            let total_liquidity = Decimal::from(liquidity_supply.amount);
             let utilization_rate: Decimal =
                 self.total_borrows / (self.total_borrows + total_liquidity);
             let borrow_rate: Decimal = if utilization_rate < optimal_utilization_rate {
@@ -119,14 +119,14 @@ impl ReserveInfo {
                 normalized_rate * (max_borrow_rate - optimal_borrow_rate) + optimal_borrow_rate
             };
 
-            let slots_elapsed = Decimal::from(clock.slot - self.last_update_slot);
+            let slots_elapsed = Decimal::from(clock.slot - self.borrow_state_update_slot);
             let interest_rate: Decimal =
                 slots_elapsed * borrow_rate / Decimal::from(SLOTS_PER_YEAR);
             let accrued_interest: Decimal = self.total_borrows * interest_rate;
 
             self.total_borrows += accrued_interest;
             self.cumulative_borrow_rate *= Decimal::from(1) + interest_rate;
-            self.last_update_slot = clock.slot;
+            self.borrow_state_update_slot = clock.slot;
         }
 
         self.cumulative_borrow_rate
@@ -136,16 +136,18 @@ impl ReserveInfo {
     pub fn collateral_exchange_rate(
         &self,
         clock: &Clock,
-        reserve_token: &TokenAccount,
+        liquidity_supply: &TokenAccount,
         collateral_mint: &Mint,
     ) -> Result<Decimal, ProgramError> {
         // TODO: is exchange rate fixed within a slot?
-        if self.last_update_slot != clock.slot {
+        if self.borrow_state_update_slot != clock.slot {
             info!("exchange rate needs to be updated");
             Err(LendingError::InvalidInput.into())
         } else {
-            Ok((self.total_borrows + Decimal::from(reserve_token.amount))
-                / Decimal::from(collateral_mint.supply))
+            Ok(
+                (self.total_borrows + Decimal::from(liquidity_supply.amount))
+                    / Decimal::from(collateral_mint.supply),
+            )
         }
     }
 }
@@ -159,14 +161,14 @@ pub struct ObligationInfo {
     /// Amount of collateral tokens deposited for this obligation
     pub collateral_amount: u64,
     /// Reserve which collateral tokens were deposited into
-    pub collateral_reserve: Pubkey,
+    pub collateral_supply: Pubkey,
     /// Borrow rate used for calculating interest.
     pub cumulative_borrow_rate: Decimal,
     /// Amount of tokens borrowed for this obligation plus interest
     pub borrow_amount: Decimal,
     /// Reserve which tokens were borrowed from
     pub borrow_reserve: Pubkey,
-    /// Mint address of the debt tokens for this obligation
+    /// Mint address of the tokens for this obligation
     pub token_mint: Pubkey,
 }
 
@@ -177,7 +179,7 @@ impl ObligationInfo {
         clock: &Clock,
         reserve: &ReserveInfo,
     ) -> Result<(), ProgramError> {
-        if clock.slot != reserve.last_update_slot {
+        if clock.slot != reserve.borrow_state_update_slot {
             info!("reserve rates need to be updated");
             return Err(LendingError::InvalidInput.into());
         }
@@ -214,16 +216,16 @@ impl Pack for ReserveInfo {
         #[allow(clippy::ptr_offset_with_cast)]
         let (
             is_initialized,
-            pool,
-            liquidity,
-            collateral,
+            lending_market,
+            liquidity_supply,
+            collateral_supply,
             collateral_mint,
             dex_market,
-            market_price,
-            market_price_updated_slot,
+            dex_market_price,
+            dex_market_price_updated_slot,
             cumulative_borrow_rate,
             total_borrows,
-            last_update_slot,
+            borrow_state_update_slot,
         ) = array_refs![input, 1, 32, 32, 32, 32, 36, 8, 8, 16, 16, 8];
         Ok(Self {
             is_initialized: match is_initialized {
@@ -231,16 +233,16 @@ impl Pack for ReserveInfo {
                 [1] => true,
                 _ => return Err(ProgramError::InvalidAccountData),
             },
-            pool: Pubkey::new_from_array(*pool),
-            liquidity_reserve: Pubkey::new_from_array(*liquidity),
-            collateral_reserve: Pubkey::new_from_array(*collateral),
+            lending_market: Pubkey::new_from_array(*lending_market),
+            liquidity_supply: Pubkey::new_from_array(*liquidity_supply),
+            collateral_supply: Pubkey::new_from_array(*collateral_supply),
             collateral_mint: Pubkey::new_from_array(*collateral_mint),
             dex_market: unpack_coption_key(dex_market)?,
-            market_price: u64::from_le_bytes(*market_price),
-            market_price_updated_slot: u64::from_le_bytes(*market_price_updated_slot),
+            dex_market_price: u64::from_le_bytes(*dex_market_price),
+            dex_market_price_updated_slot: u64::from_le_bytes(*dex_market_price_updated_slot),
             cumulative_borrow_rate: unpack_decimal(cumulative_borrow_rate),
             total_borrows: unpack_decimal(total_borrows),
-            last_update_slot: u64::from_le_bytes(*last_update_slot),
+            borrow_state_update_slot: u64::from_le_bytes(*borrow_state_update_slot),
         })
     }
 
@@ -248,45 +250,45 @@ impl Pack for ReserveInfo {
         let output = array_mut_ref![output, 0, RESERVE_LEN];
         let (
             is_initialized,
-            pool,
-            liquidity,
-            collateral,
+            lending_market,
+            liquidity_supply,
+            collateral_supply,
             collateral_mint,
             dex_market,
-            market_price,
-            market_price_updated_slot,
+            dex_market_price,
+            dex_market_price_updated_slot,
             cumulative_borrow_rate,
             total_borrows,
-            last_update_slot,
+            borrow_state_update_slot,
         ) = mut_array_refs![output, 1, 32, 32, 32, 32, 36, 8, 8, 16, 16, 8];
         is_initialized[0] = self.is_initialized as u8;
-        pool.copy_from_slice(self.pool.as_ref());
-        liquidity.copy_from_slice(self.liquidity_reserve.as_ref());
-        collateral.copy_from_slice(self.collateral_reserve.as_ref());
+        lending_market.copy_from_slice(self.lending_market.as_ref());
+        liquidity_supply.copy_from_slice(self.liquidity_supply.as_ref());
+        collateral_supply.copy_from_slice(self.collateral_supply.as_ref());
         collateral_mint.copy_from_slice(self.collateral_mint.as_ref());
         pack_coption_key(&self.dex_market, dex_market);
-        *market_price = self.market_price.to_le_bytes();
-        *market_price_updated_slot = self.market_price_updated_slot.to_le_bytes();
+        *dex_market_price = self.dex_market_price.to_le_bytes();
+        *dex_market_price_updated_slot = self.dex_market_price_updated_slot.to_le_bytes();
         pack_decimal(self.cumulative_borrow_rate, cumulative_borrow_rate);
         pack_decimal(self.total_borrows, total_borrows);
-        *last_update_slot = self.last_update_slot.to_le_bytes();
+        *borrow_state_update_slot = self.borrow_state_update_slot.to_le_bytes();
     }
 }
 
-impl Sealed for PoolInfo {}
-impl IsInitialized for PoolInfo {
+impl Sealed for LendingMarketInfo {}
+impl IsInitialized for LendingMarketInfo {
     fn is_initialized(&self) -> bool {
         self.is_initialized
     }
 }
 
-const POOL_LEN: usize = 33;
-impl Pack for PoolInfo {
+const LENDING_MARKET_LEN: usize = 33;
+impl Pack for LendingMarketInfo {
     const LEN: usize = 33;
 
-    /// Unpacks a byte buffer into a [PoolInfo](struct.PoolInfo.html).
+    /// Unpacks a byte buffer into a [LendingMarketInfo](struct.LendingMarketInfo.html).
     fn unpack_from_slice(input: &[u8]) -> Result<Self, ProgramError> {
-        let input = array_ref![input, 0, POOL_LEN];
+        let input = array_ref![input, 0, LENDING_MARKET_LEN];
         #[allow(clippy::ptr_offset_with_cast)]
         let (is_initialized, quote_token_mint) = array_refs![input, 1, 32];
         Ok(Self {
@@ -300,7 +302,7 @@ impl Pack for PoolInfo {
     }
 
     fn pack_into_slice(&self, output: &mut [u8]) {
-        let output = array_mut_ref![output, 0, POOL_LEN];
+        let output = array_mut_ref![output, 0, LENDING_MARKET_LEN];
         #[allow(clippy::ptr_offset_with_cast)]
         let (is_initialized, quote_token_mint) = mut_array_refs![output, 1, 32];
         *is_initialized = [self.is_initialized as u8];
@@ -326,20 +328,20 @@ impl Pack for ObligationInfo {
         let (
             last_update_slot,
             collateral_amount,
-            collateral_reserve,
+            collateral_supply,
             cumulative_borrow_rate,
             borrow_amount,
             borrow_reserve,
-            debt_token_mint,
+            token_mint,
         ) = array_refs![input, 8, 8, 32, 16, 16, 32, 32];
         Ok(Self {
             last_update_slot: u64::from_le_bytes(*last_update_slot),
             collateral_amount: u64::from_le_bytes(*collateral_amount),
-            collateral_reserve: Pubkey::new_from_array(*collateral_reserve),
+            collateral_supply: Pubkey::new_from_array(*collateral_supply),
             cumulative_borrow_rate: unpack_decimal(cumulative_borrow_rate),
             borrow_amount: unpack_decimal(borrow_amount),
             borrow_reserve: Pubkey::new_from_array(*borrow_reserve),
-            token_mint: Pubkey::new_from_array(*debt_token_mint),
+            token_mint: Pubkey::new_from_array(*token_mint),
         })
     }
 
@@ -348,20 +350,20 @@ impl Pack for ObligationInfo {
         let (
             last_update_slot,
             collateral_amount,
-            collateral_reserve,
+            collateral_supply,
             cumulative_borrow_rate,
             borrow_amount,
             borrow_reserve,
-            debt_token_mint,
+            token_mint,
         ) = mut_array_refs![output, 8, 8, 32, 16, 16, 32, 32];
 
         *last_update_slot = self.last_update_slot.to_le_bytes();
         *collateral_amount = self.collateral_amount.to_le_bytes();
-        collateral_reserve.copy_from_slice(self.collateral_reserve.as_ref());
+        collateral_supply.copy_from_slice(self.collateral_supply.as_ref());
         pack_decimal(self.cumulative_borrow_rate, cumulative_borrow_rate);
         pack_decimal(self.borrow_amount, borrow_amount);
         borrow_reserve.copy_from_slice(self.borrow_reserve.as_ref());
-        debt_token_mint.copy_from_slice(self.token_mint.as_ref());
+        token_mint.copy_from_slice(self.token_mint.as_ref());
     }
 }
 

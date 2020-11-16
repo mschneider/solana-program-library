@@ -7,9 +7,9 @@ use solana_sdk::{
 };
 use spl_token::state::{Account as Token, Mint};
 use spl_token_lending::{
-    instruction::{borrow, deposit, init_pool, init_reserve, set_price},
+    instruction::{borrow, deposit, init_lending_market, init_reserve, set_price},
     processor::process_instruction,
-    state::{ObligationInfo, PoolInfo, ReserveInfo},
+    state::{LendingMarketInfo, ObligationInfo, ReserveInfo},
 };
 use std::str::FromStr;
 
@@ -31,12 +31,12 @@ pub fn setup_test() -> (ProgramTest, TestMarket) {
     (test, market)
 }
 
-pub struct TestPool {
+pub struct TestLendingMarket {
     pub keypair: Keypair,
     pub authority_pubkey: Pubkey,
 }
 
-impl TestPool {
+impl TestLendingMarket {
     pub async fn init(
         banks_client: &mut BanksClient,
         quote_token_mint: Pubkey,
@@ -53,11 +53,11 @@ impl TestPool {
                 create_account(
                     &payer.pubkey(),
                     &pubkey,
-                    rent.minimum_balance(PoolInfo::LEN),
-                    PoolInfo::LEN as u64,
+                    rent.minimum_balance(LendingMarketInfo::LEN),
+                    LendingMarketInfo::LEN as u64,
                     &spl_token_lending::id(),
                 ),
-                init_pool(spl_token_lending::id(), pubkey, quote_token_mint),
+                init_lending_market(spl_token_lending::id(), pubkey, quote_token_mint),
             ],
             Some(&payer.pubkey()),
         );
@@ -66,7 +66,7 @@ impl TestPool {
         transaction.sign(&[&payer, &keypair], recent_blockhash);
         assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
 
-        TestPool {
+        TestLendingMarket {
             keypair,
             authority_pubkey,
         }
@@ -86,7 +86,7 @@ impl TestPool {
                 self.authority_pubkey,
                 amount,
                 reserve.user_token_pubkey,
-                reserve.liquidity_reserve_pubkey,
+                reserve.liquidity_supply_pubkey,
                 reserve.user_collateral_token_pubkey,
                 reserve.collateral_mint_pubkey,
             )],
@@ -141,10 +141,10 @@ impl TestPool {
                     deposit_reserve.pubkey,
                     borrow_reserve.pubkey,
                     self.authority_pubkey,
-                    borrow_reserve.liquidity_reserve_pubkey,
+                    borrow_reserve.liquidity_supply_pubkey,
                     borrow_reserve.user_token_pubkey,
                     deposit_reserve.user_collateral_token_pubkey,
-                    deposit_reserve.collateral_reserve_pubkey,
+                    deposit_reserve.collateral_supply_pubkey,
                     amount,
                     obligation_keypair.pubkey(),
                     obligation_token_mint_keypair.pubkey(),
@@ -174,13 +174,13 @@ impl TestPool {
         }
     }
 
-    pub async fn get_info(&self, banks_client: &mut BanksClient) -> PoolInfo {
-        let pool_account: Account = banks_client
+    pub async fn get_info(&self, banks_client: &mut BanksClient) -> LendingMarketInfo {
+        let lending_market_account: Account = banks_client
             .get_account(self.keypair.pubkey())
             .await
             .unwrap()
             .unwrap();
-        PoolInfo::unpack(&pool_account.data[..]).unwrap()
+        LendingMarketInfo::unpack(&lending_market_account.data[..]).unwrap()
     }
 }
 
@@ -205,8 +205,8 @@ pub struct TestReserve {
     pub pubkey: Pubkey,
     pub user_token_pubkey: Pubkey,
     pub user_collateral_token_pubkey: Pubkey,
-    pub liquidity_reserve_pubkey: Pubkey,
-    pub collateral_reserve_pubkey: Pubkey,
+    pub liquidity_supply_pubkey: Pubkey,
+    pub collateral_supply_pubkey: Pubkey,
     pub collateral_mint_pubkey: Pubkey,
 }
 
@@ -214,7 +214,7 @@ impl TestReserve {
     pub async fn init(
         banks_client: &mut BanksClient,
         token_mint_pubkey: Pubkey,
-        pool: &TestPool,
+        lending_market: &TestLendingMarket,
         payer: &Keypair,
         user_amount: Option<u64>,
         reserve_amount: u64,
@@ -225,23 +225,23 @@ impl TestReserve {
         let pubkey = keypair.pubkey();
         let collateral_mint_keypair = Keypair::new();
         let user_collateral_token_keypair = Keypair::new();
-        let collateral_reserve_keypair = Keypair::new();
+        let collateral_supply_keypair = Keypair::new();
 
         let user_token_pubkey = create_token_account(
             banks_client,
             token_mint_pubkey,
             &payer,
-            Some(pool.authority_pubkey),
+            Some(lending_market.authority_pubkey),
             user_amount,
         )
         .await;
 
-        let liquidity_reserve_pubkey = if let Some(token_mint_authority) = token_mint_authority {
-            let liquidity_reserve_pubkey = create_token_account(
+        let liquidity_supply_pubkey = if let Some(token_mint_authority) = token_mint_authority {
+            let liquidity_supply_pubkey = create_token_account(
                 banks_client,
                 token_mint_pubkey,
                 &payer,
-                Some(pool.authority_pubkey),
+                Some(lending_market.authority_pubkey),
                 None,
             )
             .await;
@@ -250,19 +250,19 @@ impl TestReserve {
                 banks_client,
                 token_mint_pubkey,
                 &payer,
-                liquidity_reserve_pubkey,
+                liquidity_supply_pubkey,
                 token_mint_authority,
                 reserve_amount,
             )
             .await;
 
-            liquidity_reserve_pubkey
+            liquidity_supply_pubkey
         } else {
             create_token_account(
                 banks_client,
                 token_mint_pubkey,
                 &payer,
-                Some(pool.authority_pubkey),
+                Some(lending_market.authority_pubkey),
                 Some(reserve_amount),
             )
             .await
@@ -280,7 +280,7 @@ impl TestReserve {
                 ),
                 create_account(
                     &payer.pubkey(),
-                    &collateral_reserve_keypair.pubkey(),
+                    &collateral_supply_keypair.pubkey(),
                     rent.minimum_balance(Token::LEN),
                     Token::LEN as u64,
                     &spl_token::id(),
@@ -302,10 +302,10 @@ impl TestReserve {
                 init_reserve(
                     spl_token_lending::id(),
                     pubkey,
-                    pool.keypair.pubkey(),
-                    liquidity_reserve_pubkey,
+                    lending_market.keypair.pubkey(),
+                    liquidity_supply_pubkey,
                     collateral_mint_keypair.pubkey(),
-                    collateral_reserve_keypair.pubkey(),
+                    collateral_supply_keypair.pubkey(),
                     user_collateral_token_keypair.pubkey(),
                     Some(market.pubkey),
                 ),
@@ -318,9 +318,9 @@ impl TestReserve {
             &vec![
                 payer,
                 &keypair,
-                &pool.keypair,
+                &lending_market.keypair,
                 &collateral_mint_keypair,
-                &collateral_reserve_keypair,
+                &collateral_supply_keypair,
                 &user_collateral_token_keypair,
             ],
             recent_blockhash,
@@ -332,8 +332,8 @@ impl TestReserve {
             pubkey,
             user_token_pubkey,
             user_collateral_token_pubkey: user_collateral_token_keypair.pubkey(),
-            liquidity_reserve_pubkey,
-            collateral_reserve_pubkey: collateral_reserve_keypair.pubkey(),
+            liquidity_supply_pubkey,
+            collateral_supply_pubkey: collateral_supply_keypair.pubkey(),
             collateral_mint_pubkey: collateral_mint_keypair.pubkey(),
         }
     }

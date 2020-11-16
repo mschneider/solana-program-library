@@ -14,17 +14,17 @@ async fn test_transaction() {
 
     let (mut banks_client, payer, recent_blockhash, bank_forks) = test.start().await;
 
-    // Initialize Pool
+    // Initialize Lending Market
     let quote_token_mint = market.usdc_mint_pubkey;
-    let pool = TestPool::init(&mut banks_client, quote_token_mint, &payer).await;
-    let pool_info = pool.get_info(&mut banks_client).await;
-    assert_eq!(pool_info.is_initialized, true);
-    assert_eq!(pool_info.quote_token_mint, quote_token_mint);
+    let lending_market = TestLendingMarket::init(&mut banks_client, quote_token_mint, &payer).await;
+    let lending_market_info = lending_market.get_info(&mut banks_client).await;
+    assert_eq!(lending_market_info.is_initialized, true);
+    assert_eq!(lending_market_info.quote_token_mint, quote_token_mint);
 
     let usdc_reserve = TestReserve::init(
         &mut banks_client,
         market.usdc_mint_pubkey,
-        &pool,
+        &lending_market,
         &payer,
         None,
         1000 * market.price,
@@ -36,7 +36,7 @@ async fn test_transaction() {
     let sol_reserve = TestReserve::init(
         &mut banks_client,
         spl_token::native_mint::id(),
-        &pool,
+        &lending_market,
         &payer,
         Some(1000),
         1000,
@@ -48,55 +48,62 @@ async fn test_transaction() {
     // Verify reserve Accounts
     let usdc_reserve_info = usdc_reserve.get_info(&mut banks_client).await;
     assert_eq!(usdc_reserve_info.is_initialized, true);
-    assert_eq!(usdc_reserve_info.pool, pool.keypair.pubkey());
     assert_eq!(
-        usdc_reserve_info.liquidity_reserve,
-        usdc_reserve.liquidity_reserve_pubkey
+        usdc_reserve_info.lending_market,
+        lending_market.keypair.pubkey()
     );
     assert_eq!(
-        usdc_reserve_info.collateral_reserve,
-        usdc_reserve.collateral_reserve_pubkey
+        usdc_reserve_info.liquidity_supply,
+        usdc_reserve.liquidity_supply_pubkey
+    );
+    assert_eq!(
+        usdc_reserve_info.collateral_supply,
+        usdc_reserve.collateral_supply_pubkey
     );
     assert_eq!(
         usdc_reserve_info.collateral_mint,
         usdc_reserve.collateral_mint_pubkey
     );
     assert_eq!(usdc_reserve_info.dex_market, COption::None);
-    assert_eq!(usdc_reserve_info.market_price, 0);
-    assert_eq!(usdc_reserve_info.market_price_updated_slot, 0);
+    assert_eq!(usdc_reserve_info.dex_market_price, 0);
+    assert_eq!(usdc_reserve_info.dex_market_price_updated_slot, 0);
 
-    let usdc_liquidity_reserve =
-        get_token_balance(&mut banks_client, usdc_reserve.liquidity_reserve_pubkey).await;
-    assert_eq!(usdc_liquidity_reserve, 1000 * market.price);
+    let usdc_liquidity_supply =
+        get_token_balance(&mut banks_client, usdc_reserve.liquidity_supply_pubkey).await;
+    assert_eq!(usdc_liquidity_supply, 1000 * market.price);
 
     let sol_reserve_info = sol_reserve.get_info(&mut banks_client).await;
     assert_eq!(sol_reserve_info.is_initialized, true);
-    assert_eq!(sol_reserve_info.pool, pool.keypair.pubkey());
     assert_eq!(
-        sol_reserve_info.liquidity_reserve,
-        sol_reserve.liquidity_reserve_pubkey
+        sol_reserve_info.lending_market,
+        lending_market.keypair.pubkey()
     );
     assert_eq!(
-        sol_reserve_info.collateral_reserve,
-        sol_reserve.collateral_reserve_pubkey
+        sol_reserve_info.liquidity_supply,
+        sol_reserve.liquidity_supply_pubkey
+    );
+    assert_eq!(
+        sol_reserve_info.collateral_supply,
+        sol_reserve.collateral_supply_pubkey
     );
     assert_eq!(
         sol_reserve_info.collateral_mint,
         sol_reserve.collateral_mint_pubkey
     );
     assert_eq!(sol_reserve_info.dex_market, COption::Some(market.pubkey));
-    assert_eq!(sol_reserve_info.market_price, 0);
-    assert_eq!(sol_reserve_info.market_price_updated_slot, 0);
+    assert_eq!(sol_reserve_info.dex_market_price, 0);
+    assert_eq!(sol_reserve_info.dex_market_price_updated_slot, 0);
 
-    let sol_liquidity_reserve =
-        get_token_balance(&mut banks_client, sol_reserve.liquidity_reserve_pubkey).await;
-    assert_eq!(sol_liquidity_reserve, 1000);
+    let sol_liquidity_supply =
+        get_token_balance(&mut banks_client, sol_reserve.liquidity_supply_pubkey).await;
+    assert_eq!(sol_liquidity_supply, 1000);
 
     market
         .set_price(&mut banks_client, sol_reserve.pubkey, &payer)
         .await;
 
-    pool.deposit(&mut banks_client, &payer, &sol_reserve, 1000)
+    lending_market
+        .deposit(&mut banks_client, &payer, &sol_reserve, 1000)
         .await;
 
     let user_sol_account = banks_client
@@ -114,14 +121,14 @@ async fn test_transaction() {
     assert_eq!(user_sol.amount, 0);
     assert_eq!(user_sol_collateral.amount, 2000);
 
-    let obligation = pool
+    let obligation = lending_market
         .borrow(
             &mut banks_client,
             &payer,
             &sol_reserve,
             &usdc_reserve,
             1000,
-            pool.authority_pubkey,
+            lending_market.authority_pubkey,
         )
         .await;
 
@@ -143,11 +150,11 @@ async fn test_transaction() {
             spl_token_lending::id(),
             usdc_reserve.pubkey,
             sol_reserve.pubkey,
-            pool.authority_pubkey,
+            lending_market.authority_pubkey,
             usdc_reserve.user_token_pubkey,
-            usdc_reserve.liquidity_reserve_pubkey,
+            usdc_reserve.liquidity_supply_pubkey,
             2204000,
-            sol_reserve.collateral_reserve_pubkey,
+            sol_reserve.collateral_supply_pubkey,
             sol_reserve.user_collateral_token_pubkey,
             obligation.pubkey,
             obligation.token_mint,
