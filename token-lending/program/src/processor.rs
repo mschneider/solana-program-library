@@ -40,27 +40,23 @@ pub fn process_instruction(
             info!("Instruction: Init Reserve");
             process_init_reserve(program_id, accounts)
         }
-        LendingInstruction::Deposit {
-            liquidity_amount: amount,
-        } => {
+        LendingInstruction::DepositReserveLiquidity { liquidity_amount } => {
             info!("Instruction: Deposit");
-            process_deposit(program_id, amount, accounts)
+            process_deposit(program_id, liquidity_amount, accounts)
         }
-        LendingInstruction::Withdraw {
-            liquidity_amount: amount,
-        } => {
+        LendingInstruction::WithdrawReserveLiquidity { collateral_amount } => {
             info!("Instruction: Withdraw");
-            process_withdraw(program_id, amount, accounts)
+            process_withdraw(program_id, collateral_amount, accounts)
         }
-        LendingInstruction::Borrow { collateral_amount } => {
+        LendingInstruction::BorrowReserveLiquidity { collateral_amount } => {
             info!("Instruction: Borrow");
             process_borrow(program_id, collateral_amount, accounts)
         }
-        LendingInstruction::Repay { liquidity_amount } => {
+        LendingInstruction::RepayReserveLiquidity { liquidity_amount } => {
             info!("Instruction: Repay");
             process_repay(program_id, liquidity_amount, accounts)
         }
-        LendingInstruction::SetPrice => {
+        LendingInstruction::SetDexMarketPrice => {
             info!("Instruction: Set price");
             process_set_price(accounts)
         }
@@ -246,7 +242,11 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     Ok(())
 }
 
-fn process_deposit(program_id: &Pubkey, amount: u64, accounts: &[AccountInfo]) -> ProgramResult {
+fn process_deposit(
+    program_id: &Pubkey,
+    liquidity_amount: u64,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let reserve_info = next_account_info(account_info_iter)?;
     let lending_market_authority_info = next_account_info(account_info_iter)?;
@@ -279,7 +279,7 @@ fn process_deposit(program_id: &Pubkey, amount: u64, accounts: &[AccountInfo]) -
     spl_token_transfer(TokenTransferParams {
         source: liquidity_input_info.clone(),
         destination: liquidity_supply_info.clone(),
-        amount,
+        amount: liquidity_amount,
         authority: lending_market_authority_info.clone(),
         authorized: &reserve.lending_market,
         bump_seed,
@@ -292,7 +292,7 @@ fn process_deposit(program_id: &Pubkey, amount: u64, accounts: &[AccountInfo]) -
     spl_token_mint_to(TokenMintToParams {
         mint: collateral_mint_info.clone(),
         destination: collateral_output_info.clone(),
-        amount,
+        amount: liquidity_amount,
         authority: lending_market_authority_info.clone(),
         authorized: &reserve.lending_market,
         bump_seed,
@@ -312,8 +312,8 @@ fn process_withdraw(
     let lending_market_authority_info = next_account_info(account_info_iter)?;
     let liquidity_supply_info = next_account_info(account_info_iter)?;
     let liquidity_output_info = next_account_info(account_info_iter)?;
-    let collateral_input_info = next_account_info(account_info_iter)?;
     let collateral_mint_info = next_account_info(account_info_iter)?;
+    let collateral_input_info = next_account_info(account_info_iter)?;
     let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
     let token_program_id = next_account_info(account_info_iter)?;
 

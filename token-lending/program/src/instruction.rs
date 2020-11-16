@@ -46,7 +46,7 @@ pub enum LendingInstruction {
     ///   4. `[writable]` Collateral output SPL Token account,
     ///   5. `[writable]` Collateral SPL Token mint.
     ///   6. '[]` Token program id
-    Deposit {
+    DepositReserveLiquidity {
         /// Amount to deposit into the reserve
         liquidity_amount: u64,
     },
@@ -61,9 +61,9 @@ pub enum LendingInstruction {
     ///   2. `[writable]` Collateral input SPL Token account. $authority can transfer $amount
     ///   5. `[writable]` Collateral SPL Token mint.
     ///   6. '[]` Token program id
-    Withdraw {
-        /// Amount to withdraw from the reserve
-        liquidity_amount: u64,
+    WithdrawReserveLiquidity {
+        /// Amount of collateral to deposit in exchange for liquidity
+        collateral_amount: u64,
     },
 
     /// Borrow tokens from a reserve by depositing collateral tokens. The number of borrowed tokens
@@ -83,7 +83,8 @@ pub enum LendingInstruction {
     ///   11 `[]` Clock sysvar
     ///   12 `[]` Rent sysvar
     ///   13 '[]` Token program id
-    Borrow {
+    BorrowReserveLiquidity {
+        // TODO: slippage constraint
         /// Amount of collateral to deposit
         collateral_amount: u64,
     },
@@ -101,9 +102,9 @@ pub enum LendingInstruction {
     ///   7. `[writable]` Obligation - initialized
     ///   8. `[writable]` Obligation token mint, $authority can transfer calculated amount
     ///   9. `[writable]` Obligation token input
-    ///   10. `[]` Clock sysvar
-    ///   11. `[]` Token program id
-    Repay {
+    ///   10 `[]` Clock sysvar
+    ///   11 `[]` Token program id
+    RepayReserveLiquidity {
         /// Amount of loan to repay
         liquidity_amount: u64,
     },
@@ -115,7 +116,7 @@ pub enum LendingInstruction {
     ///   3. `[]` Serum DEX market bids. Must be initialized and match dex market.
     ///   2. `[]` Serum DEX market asks. Must be initialized and match dex market.
     ///   4. `[]` Clock sysvar
-    SetPrice,
+    SetDexMarketPrice,
 }
 
 impl LendingInstruction {
@@ -129,21 +130,21 @@ impl LendingInstruction {
             1 => Self::InitReserve,
             2 => {
                 let (liquidity_amount, _rest) = Self::unpack_u64(rest)?;
-                Self::Deposit { liquidity_amount }
+                Self::DepositReserveLiquidity { liquidity_amount }
             }
             3 => {
-                let (liquidity_amount, _rest) = Self::unpack_u64(rest)?;
-                Self::Withdraw { liquidity_amount }
+                let (collateral_amount, _rest) = Self::unpack_u64(rest)?;
+                Self::WithdrawReserveLiquidity { collateral_amount }
             }
             4 => {
                 let (collateral_amount, _rest) = Self::unpack_u64(rest)?;
-                Self::Borrow { collateral_amount }
+                Self::BorrowReserveLiquidity { collateral_amount }
             }
             5 => {
                 let (liquidity_amount, _rest) = Self::unpack_u64(rest)?;
-                Self::Repay { liquidity_amount }
+                Self::RepayReserveLiquidity { liquidity_amount }
             }
-            6 => Self::SetPrice,
+            6 => Self::SetDexMarketPrice,
             _ => return Err(LendingError::InvalidInstruction.into()),
         })
     }
@@ -172,23 +173,23 @@ impl LendingInstruction {
             Self::InitReserve => {
                 buf.push(1);
             }
-            Self::Deposit { liquidity_amount } => {
+            Self::DepositReserveLiquidity { liquidity_amount } => {
                 buf.push(2);
                 buf.extend_from_slice(&liquidity_amount.to_le_bytes());
             }
-            Self::Withdraw { liquidity_amount } => {
+            Self::WithdrawReserveLiquidity { collateral_amount } => {
                 buf.push(3);
-                buf.extend_from_slice(&liquidity_amount.to_le_bytes());
+                buf.extend_from_slice(&collateral_amount.to_le_bytes());
             }
-            Self::Borrow { collateral_amount } => {
+            Self::BorrowReserveLiquidity { collateral_amount } => {
                 buf.push(4);
                 buf.extend_from_slice(&collateral_amount.to_le_bytes());
             }
-            Self::Repay { liquidity_amount } => {
+            Self::RepayReserveLiquidity { liquidity_amount } => {
                 buf.push(5);
                 buf.extend_from_slice(&liquidity_amount.to_le_bytes());
             }
-            Self::SetPrice => {
+            Self::SetDexMarketPrice => {
                 buf.push(6);
             }
         }
@@ -252,13 +253,13 @@ pub fn init_reserve(
     }
 }
 
-/// Creates a 'Deposit' instruction.
+/// Creates a 'DepositReserveLiquidity' instruction.
 #[allow(clippy::too_many_arguments)]
-pub fn deposit(
+pub fn deposit_reserve_liquidity(
     program_id: Pubkey,
     reserve_pubkey: Pubkey,
     lending_market_authority_pubkey: Pubkey,
-    amount: u64,
+    liquidity_amount: u64,
     liquidity_input_pubkey: Pubkey,
     liquidity_supply_pubkey: Pubkey,
     collateral_output_pubkey: Pubkey,
@@ -275,24 +276,21 @@ pub fn deposit(
             AccountMeta::new(collateral_mint_pubkey, false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
-        data: LendingInstruction::Deposit {
-            liquidity_amount: amount,
-        }
-        .pack(),
+        data: LendingInstruction::DepositReserveLiquidity { liquidity_amount }.pack(),
     }
 }
 
-/// Creates a 'Withdraw' instruction.
+/// Creates a 'WithdrawReserveLiquidity' instruction.
 #[allow(clippy::too_many_arguments)]
-pub fn withdraw(
+pub fn withdraw_reserve_liquidity(
     program_id: Pubkey,
     reserve_pubkey: Pubkey,
     lending_market_authority_pubkey: Pubkey,
-    amount: u64,
     liquidity_supply_pubkey: Pubkey,
     liquidity_output_pubkey: Pubkey,
-    collateral_input_pubkey: Pubkey,
     collateral_mint_pubkey: Pubkey,
+    collateral_input_pubkey: Pubkey,
+    collateral_amount: u64,
 ) -> Instruction {
     Instruction {
         program_id,
@@ -301,21 +299,18 @@ pub fn withdraw(
             AccountMeta::new_readonly(lending_market_authority_pubkey, false),
             AccountMeta::new(liquidity_supply_pubkey, false),
             AccountMeta::new(liquidity_output_pubkey, false),
-            AccountMeta::new(collateral_input_pubkey, false),
             AccountMeta::new(collateral_mint_pubkey, false),
+            AccountMeta::new(collateral_input_pubkey, false),
             AccountMeta::new_readonly(sysvar::clock::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
-        data: LendingInstruction::Withdraw {
-            liquidity_amount: amount,
-        }
-        .pack(),
+        data: LendingInstruction::WithdrawReserveLiquidity { collateral_amount }.pack(),
     }
 }
 
-/// Creates a 'Borrow' instruction.
+/// Creates a 'BorrowReserveLiquidity' instruction.
 #[allow(clippy::too_many_arguments)]
-pub fn borrow(
+pub fn borrow_reserve_liquidity(
     program_id: Pubkey,
     deposit_reserve_pubkey: Pubkey,
     borrow_reserve_pubkey: Pubkey,
@@ -348,13 +343,13 @@ pub fn borrow(
             AccountMeta::new_readonly(sysvar::rent::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
-        data: LendingInstruction::Borrow { collateral_amount }.pack(),
+        data: LendingInstruction::BorrowReserveLiquidity { collateral_amount }.pack(),
     }
 }
 
-/// Creates a `Repay` instruction
+/// Creates a `RepayReserveLiquidity` instruction
 #[allow(clippy::too_many_arguments)]
-pub fn repay(
+pub fn repay_reserve_liquidity(
     program_id: Pubkey,
     repay_reserve_pubkey: Pubkey,
     withdraw_reserve_pubkey: Pubkey,
@@ -384,12 +379,12 @@ pub fn repay(
             AccountMeta::new_readonly(sysvar::clock::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
-        data: LendingInstruction::Repay { liquidity_amount }.pack(),
+        data: LendingInstruction::RepayReserveLiquidity { liquidity_amount }.pack(),
     }
 }
 
-/// Creates a `SetPrice` instruction
-pub fn set_price(
+/// Creates a `SetDexMarketPrice` instruction
+pub fn set_dex_market_price(
     program_id: Pubkey,
     reserve_pubkey: Pubkey,
     dex_market_pubkey: Pubkey,
@@ -407,6 +402,6 @@ pub fn set_price(
             AccountMeta::new_readonly(sysvar::clock::id(), false),
             AccountMeta::new(memory_pubkey, false),
         ],
-        data: LendingInstruction::SetPrice.pack(),
+        data: LendingInstruction::SetDexMarketPrice.pack(),
     }
 }

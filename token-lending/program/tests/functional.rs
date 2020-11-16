@@ -6,7 +6,7 @@ use solana_program::{program_option::COption, program_pack::Pack};
 use solana_program_test::*;
 use solana_sdk::{signature::Signer, transaction::Transaction};
 use spl_token::state::Account as Token;
-use spl_token_lending::{instruction::repay, state::SLOTS_PER_YEAR};
+use spl_token_lending::{instruction::repay_reserve_liquidity, state::SLOTS_PER_YEAR};
 
 #[tokio::test]
 async fn test_transaction() {
@@ -146,7 +146,7 @@ async fn test_transaction() {
     }
 
     let mut transaction = Transaction::new_with_payer(
-        &[repay(
+        &[repay_reserve_liquidity(
             spl_token_lending::id(),
             usdc_reserve.pubkey,
             sol_reserve.pubkey,

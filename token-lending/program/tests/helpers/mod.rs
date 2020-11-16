@@ -7,7 +7,10 @@ use solana_sdk::{
 };
 use spl_token::state::{Account as Token, Mint};
 use spl_token_lending::{
-    instruction::{borrow, deposit, init_lending_market, init_reserve, set_price},
+    instruction::{
+        borrow_reserve_liquidity, deposit_reserve_liquidity, init_lending_market, init_reserve,
+        set_dex_market_price,
+    },
     processor::process_instruction,
     state::{LendingMarketInfo, ObligationInfo, ReserveInfo},
 };
@@ -80,7 +83,7 @@ impl TestLendingMarket {
         amount: u64,
     ) {
         let mut transaction = Transaction::new_with_payer(
-            &[deposit(
+            &[deposit_reserve_liquidity(
                 spl_token_lending::id(),
                 reserve.pubkey,
                 self.authority_pubkey,
@@ -136,7 +139,7 @@ impl TestLendingMarket {
                     ObligationInfo::LEN as u64,
                     &spl_token_lending::id(),
                 ),
-                borrow(
+                borrow_reserve_liquidity(
                     spl_token_lending::id(),
                     deposit_reserve.pubkey,
                     borrow_reserve.pubkey,
@@ -206,8 +209,8 @@ pub struct TestReserve {
     pub user_token_pubkey: Pubkey,
     pub user_collateral_token_pubkey: Pubkey,
     pub liquidity_supply_pubkey: Pubkey,
-    pub collateral_supply_pubkey: Pubkey,
     pub collateral_mint_pubkey: Pubkey,
+    pub collateral_supply_pubkey: Pubkey,
 }
 
 impl TestReserve {
@@ -429,7 +432,7 @@ impl TestMarket {
                     65528,
                     &solana_program::system_program::id(),
                 ),
-                set_price(
+                set_dex_market_price(
                     spl_token_lending::id(),
                     reserve_pubkey,
                     self.pubkey,
