@@ -4,7 +4,7 @@ use crate::{
     error::LendingError,
     instruction::LendingInstruction,
     math::Decimal,
-    state::{LendingMarketInfo, ObligationInfo, ReserveInfo},
+    state::{LendingMarket, Obligation, Reserve},
 };
 use arrayref::{array_refs, mut_array_refs};
 use num_traits::FromPrimitive;
@@ -82,10 +82,10 @@ fn process_init_lending_market(_program_id: &Pubkey, accounts: &[AccountInfo]) -
 
     unpack_mint(&quote_token_mint_info.data.borrow())?;
 
-    let mut new_lending_market: LendingMarketInfo = assert_uninitialized(lending_market_info)?;
+    let mut new_lending_market: LendingMarket = assert_uninitialized(lending_market_info)?;
     new_lending_market.is_initialized = true;
     new_lending_market.quote_token_mint = *quote_token_mint_info.key;
-    LendingMarketInfo::pack(
+    LendingMarket::pack(
         new_lending_market,
         &mut lending_market_info.data.borrow_mut(),
     )?;
@@ -112,7 +112,7 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         return Err(LendingError::NotRentExempt.into());
     }
 
-    let lending_market = LendingMarketInfo::unpack(&lending_market_info.data.borrow())?;
+    let lending_market = LendingMarket::unpack(&lending_market_info.data.borrow())?;
     let bump_seed = find_authority_bump_seed(program_id, &lending_market_info.key);
     if lending_market_authority_info.key
         != &authority_id(program_id, lending_market_info.key, bump_seed)?
@@ -180,7 +180,7 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         token_program: token_program_id.clone(),
     })?;
 
-    let mut new_reserve: ReserveInfo = assert_uninitialized(reserve_info)?;
+    let mut new_reserve: Reserve = assert_uninitialized(reserve_info)?;
     new_reserve.is_initialized = true;
     new_reserve.lending_market = *lending_market_info.key;
     new_reserve.liquidity_supply = *liquidity_supply_info.key;
@@ -246,7 +246,7 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     };
 
     new_reserve.dex_market = dex_market;
-    ReserveInfo::pack(new_reserve, &mut reserve_info.data.borrow_mut())?;
+    Reserve::pack(new_reserve, &mut reserve_info.data.borrow_mut())?;
 
     Ok(())
 }
@@ -266,7 +266,7 @@ fn process_deposit(
     let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
-    let mut reserve = ReserveInfo::unpack(&reserve_info.data.borrow())?;
+    let mut reserve = Reserve::unpack(&reserve_info.data.borrow())?;
     let bump_seed = find_authority_bump_seed(program_id, &reserve.lending_market);
     if lending_market_authority_info.key
         != &authority_id(program_id, &reserve.lending_market, bump_seed)?
@@ -334,7 +334,7 @@ fn process_withdraw(
     let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
-    let mut reserve = ReserveInfo::unpack(&reserve_info.data.borrow())?;
+    let mut reserve = Reserve::unpack(&reserve_info.data.borrow())?;
     let bump_seed = find_authority_bump_seed(program_id, &reserve.lending_market);
     if lending_market_authority_info.key
         != &authority_id(program_id, &reserve.lending_market, bump_seed)?
@@ -385,7 +385,7 @@ fn process_withdraw(
         token_program: token_program_id.clone(),
     })?;
 
-    ReserveInfo::pack(reserve, &mut reserve_info.data.borrow_mut())?;
+    Reserve::pack(reserve, &mut reserve_info.data.borrow_mut())?;
 
     Ok(())
 }
@@ -434,8 +434,8 @@ fn process_borrow(
         return Err(LendingError::NotRentExempt.into());
     }
 
-    let deposit_reserve = ReserveInfo::unpack(&deposit_reserve_info.data.borrow())?;
-    let mut borrow_reserve = ReserveInfo::unpack(&borrow_reserve_info.data.borrow())?;
+    let deposit_reserve = Reserve::unpack(&deposit_reserve_info.data.borrow())?;
+    let mut borrow_reserve = Reserve::unpack(&borrow_reserve_info.data.borrow())?;
     let deposit_reserve_collateral_supply =
         unpack_token_account(&deposit_reserve_collateral_supply_info.data.borrow())?;
 
@@ -501,7 +501,7 @@ fn process_borrow(
     })?;
 
     borrow_reserve.add_borrow(Decimal::from(borrow_amount));
-    ReserveInfo::pack(borrow_reserve, &mut borrow_reserve_info.data.borrow_mut())?;
+    Reserve::pack(borrow_reserve, &mut borrow_reserve_info.data.borrow_mut())?;
 
     if obligation_token_mint_info.owner != token_program_id.key {
         return Err(LendingError::InvalidTokenProgram.into());
@@ -538,7 +538,7 @@ fn process_borrow(
         token_program: token_program_id.clone(),
     })?;
 
-    let mut new_obligation: ObligationInfo = assert_uninitialized(obligation_info)?;
+    let mut new_obligation: Obligation = assert_uninitialized(obligation_info)?;
     new_obligation.last_update_slot = clock.slot;
     new_obligation.collateral_amount = collateral_amount;
     new_obligation.collateral_supply = *deposit_reserve_info.key;
@@ -546,7 +546,7 @@ fn process_borrow(
     new_obligation.borrow_amount = Decimal::from(borrow_amount);
     new_obligation.borrow_reserve = *borrow_reserve_info.key;
     new_obligation.token_mint = *obligation_token_mint_info.key;
-    ObligationInfo::pack(new_obligation, &mut obligation_info.data.borrow_mut())?;
+    Obligation::pack(new_obligation, &mut obligation_info.data.borrow_mut())?;
 
     Ok(())
 }
@@ -571,7 +571,7 @@ fn process_repay(
     let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
     let token_program_id = next_account_info(account_info_iter)?;
 
-    let mut obligation = ObligationInfo::unpack(&obligation_info.data.borrow())?;
+    let mut obligation = Obligation::unpack(&obligation_info.data.borrow())?;
     if &obligation.token_mint != obligation_mint_info.key {
         return Err(LendingError::InvalidInput.into());
     }
@@ -582,8 +582,8 @@ fn process_repay(
         return Err(LendingError::InvalidInput.into());
     }
 
-    let mut repay_reserve = ReserveInfo::unpack(&repay_reserve_info.data.borrow())?;
-    let withdraw_reserve = ReserveInfo::unpack(&withdraw_reserve_info.data.borrow())?;
+    let mut repay_reserve = Reserve::unpack(&repay_reserve_info.data.borrow())?;
+    let withdraw_reserve = Reserve::unpack(&withdraw_reserve_info.data.borrow())?;
     if repay_reserve.lending_market != withdraw_reserve.lending_market {
         return Err(LendingError::LendingMarketMismatch.into());
     }
@@ -649,10 +649,10 @@ fn process_repay(
     obligation.last_update_slot = clock.slot;
     obligation.borrow_amount -= Decimal::from(repay_amount);
     obligation.collateral_amount -= collateral_withdraw_amount;
-    ObligationInfo::pack(obligation, &mut obligation_info.data.borrow_mut())?;
+    Obligation::pack(obligation, &mut obligation_info.data.borrow_mut())?;
 
     repay_reserve.subtract_repay(Decimal::from(repay_amount));
-    ReserveInfo::pack(repay_reserve, &mut repay_reserve_info.data.borrow_mut())?;
+    Reserve::pack(repay_reserve, &mut repay_reserve_info.data.borrow_mut())?;
 
     Ok(())
 }
@@ -988,7 +988,7 @@ fn deposit_to_borrow(
     memory: &AccountInfo,
     dex_market_orders_info: &AccountInfo,
     dex_market_info: &AccountInfo,
-    deposit_reserve: &ReserveInfo,
+    deposit_reserve: &Reserve,
 ) -> Result<u64, ProgramError> {
     let orders = align_orders(dex_market_orders_info, memory);
     let market_quote_mint = quote_mint_pubkey(&dex_market_info.data.borrow());

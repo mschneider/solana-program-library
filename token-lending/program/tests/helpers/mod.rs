@@ -11,7 +11,7 @@ use spl_token_lending::{
         borrow_reserve_liquidity, deposit_reserve_liquidity, init_lending_market, init_reserve,
     },
     processor::process_instruction,
-    state::{LendingMarketInfo, ObligationInfo, ReserveInfo},
+    state::{LendingMarket, Obligation, Reserve},
 };
 use std::str::FromStr;
 
@@ -55,8 +55,8 @@ impl TestLendingMarket {
                 create_account(
                     &payer.pubkey(),
                     &pubkey,
-                    rent.minimum_balance(LendingMarketInfo::LEN),
-                    LendingMarketInfo::LEN as u64,
+                    rent.minimum_balance(LendingMarket::LEN),
+                    LendingMarket::LEN as u64,
                     &spl_token_lending::id(),
                 ),
                 init_lending_market(spl_token_lending::id(), pubkey, quote_token_mint),
@@ -141,8 +141,8 @@ impl TestLendingMarket {
                 create_account(
                     &payer.pubkey(),
                     &obligation_keypair.pubkey(),
-                    rent.minimum_balance(ObligationInfo::LEN),
-                    ObligationInfo::LEN as u64,
+                    rent.minimum_balance(Obligation::LEN),
+                    Obligation::LEN as u64,
                     &spl_token_lending::id(),
                 ),
                 create_account(
@@ -196,13 +196,13 @@ impl TestLendingMarket {
         }
     }
 
-    pub async fn get_info(&self, banks_client: &mut BanksClient) -> LendingMarketInfo {
+    pub async fn get_info(&self, banks_client: &mut BanksClient) -> LendingMarket {
         let lending_market_account: Account = banks_client
             .get_account(self.keypair.pubkey())
             .await
             .unwrap()
             .unwrap();
-        LendingMarketInfo::unpack(&lending_market_account.data[..]).unwrap()
+        LendingMarket::unpack(&lending_market_account.data[..]).unwrap()
     }
 }
 
@@ -213,13 +213,13 @@ pub struct TestObligation {
 }
 
 impl TestObligation {
-    pub async fn get_info(&self, banks_client: &mut BanksClient) -> ObligationInfo {
+    pub async fn get_info(&self, banks_client: &mut BanksClient) -> Obligation {
         let obligation_account: Account = banks_client
             .get_account(self.pubkey)
             .await
             .unwrap()
             .unwrap();
-        ObligationInfo::unpack(&obligation_account.data[..]).unwrap()
+        Obligation::unpack(&obligation_account.data[..]).unwrap()
     }
 }
 
@@ -323,8 +323,8 @@ impl TestReserve {
                 create_account(
                     &payer.pubkey(),
                     &pubkey,
-                    rent.minimum_balance(ReserveInfo::LEN),
-                    ReserveInfo::LEN as u64,
+                    rent.minimum_balance(Reserve::LEN),
+                    Reserve::LEN as u64,
                     &spl_token_lending::id(),
                 ),
                 init_reserve(
@@ -367,13 +367,13 @@ impl TestReserve {
         }
     }
 
-    pub async fn get_info(&self, banks_client: &mut BanksClient) -> ReserveInfo {
+    pub async fn get_info(&self, banks_client: &mut BanksClient) -> Reserve {
         let reserve_account: Account = banks_client
             .get_account(self.pubkey)
             .await
             .unwrap()
             .unwrap();
-        ReserveInfo::unpack(&reserve_account.data[..]).unwrap()
+        Reserve::unpack(&reserve_account.data[..]).unwrap()
     }
 }
 

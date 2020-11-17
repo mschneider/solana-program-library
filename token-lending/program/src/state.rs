@@ -26,7 +26,7 @@ pub const SLOTS_PER_YEAR: u64 =
 /// Lending market state
 #[repr(C)]
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct LendingMarketInfo {
+pub struct LendingMarket {
     /// Initialized state.
     pub is_initialized: bool,
     /// Quote currency token mint.
@@ -36,7 +36,7 @@ pub struct LendingMarketInfo {
 /// Lending market reserve state
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ReserveInfo {
+pub struct Reserve {
     /// Initialized state.
     pub is_initialized: bool,
     /// Lending market address
@@ -67,7 +67,7 @@ pub struct ReserveInfo {
     pub borrow_state_update_slot: u64,
 }
 
-impl ReserveInfo {
+impl Reserve {
     /// Fetch the current market price
     pub fn current_dex_market_price(&self, clock: &Clock) -> Result<u64, ProgramError> {
         if self.dex_market.is_none() {
@@ -197,7 +197,7 @@ impl ReserveInfo {
 /// Borrow obligation state
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ObligationInfo {
+pub struct Obligation {
     /// Slot when obligation was updated. Used for calculating interest.
     pub last_update_slot: u64,
     /// Amount of collateral tokens deposited for this obligation
@@ -214,12 +214,12 @@ pub struct ObligationInfo {
     pub token_mint: Pubkey,
 }
 
-impl ObligationInfo {
+impl Obligation {
     /// Accrue interest
     pub fn accrue_interest(
         &mut self,
         clock: &Clock,
-        reserve: &ReserveInfo,
+        reserve: &Reserve,
     ) -> Result<(), ProgramError> {
         if clock.slot != reserve.borrow_state_update_slot {
             info!("reserve rates need to be updated");
@@ -241,15 +241,15 @@ impl ObligationInfo {
     }
 }
 
-impl Sealed for ReserveInfo {}
-impl IsInitialized for ReserveInfo {
+impl Sealed for Reserve {}
+impl IsInitialized for Reserve {
     fn is_initialized(&self) -> bool {
         self.is_initialized
     }
 }
 
 const RESERVE_LEN: usize = 253;
-impl Pack for ReserveInfo {
+impl Pack for Reserve {
     const LEN: usize = 253;
 
     /// Unpacks a byte buffer into a [ReserveInfo](struct.ReserveInfo.html).
@@ -321,15 +321,15 @@ impl Pack for ReserveInfo {
     }
 }
 
-impl Sealed for LendingMarketInfo {}
-impl IsInitialized for LendingMarketInfo {
+impl Sealed for LendingMarket {}
+impl IsInitialized for LendingMarket {
     fn is_initialized(&self) -> bool {
         self.is_initialized
     }
 }
 
 const LENDING_MARKET_LEN: usize = 33;
-impl Pack for LendingMarketInfo {
+impl Pack for LendingMarket {
     const LEN: usize = 33;
 
     /// Unpacks a byte buffer into a [LendingMarketInfo](struct.LendingMarketInfo.html).
@@ -356,15 +356,15 @@ impl Pack for LendingMarketInfo {
     }
 }
 
-impl Sealed for ObligationInfo {}
-impl IsInitialized for ObligationInfo {
+impl Sealed for Obligation {}
+impl IsInitialized for Obligation {
     fn is_initialized(&self) -> bool {
         self.last_update_slot > 0
     }
 }
 
 const OBLIGATION_LEN: usize = 144;
-impl Pack for ObligationInfo {
+impl Pack for Obligation {
     const LEN: usize = 144;
 
     /// Unpacks a byte buffer into a [ObligationInfo](struct.ObligationInfo.html).
