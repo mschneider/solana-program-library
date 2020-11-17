@@ -11,7 +11,7 @@ import {
 } from "@solana/web3.js";
 import { Token } from "@solana/spl-token";
 
-import { TokenReserve } from "../client";
+import { PoolReserve } from "../client";
 import { Store } from "../client/util/store";
 import { newAccountWithLamports } from "../client/util/new-account-with-lamports";
 import { url } from "../client/util/url";
@@ -86,7 +86,7 @@ export async function createLendingReserve(): Promise<void> {
   const reserveToken = await reserveTokenMint.createAccount(authority);
 
   console.log("creating token reserve");
-  await TokenReserve.create({
+  await PoolReserve.create({
     connection,
     tokenProgramId,
     reserveAccount,
