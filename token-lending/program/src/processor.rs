@@ -8,7 +8,7 @@ use crate::{
 };
 use arrayref::{array_refs, mut_array_refs};
 use num_traits::FromPrimitive;
-use serum_dex::critbit::{Slab, SlabView};
+use serum_dex::critbit::{AnyNode, Slab, SlabView};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     decode_error::DecodeError,
@@ -55,10 +55,6 @@ pub fn process_instruction(
         LendingInstruction::RepayReserveLiquidity { liquidity_amount } => {
             info!("Instruction: Repay");
             process_repay(program_id, liquidity_amount, accounts)
-        }
-        LendingInstruction::SetDexMarketPrice => {
-            info!("Instruction: Set price");
-            process_set_price(accounts)
         }
     }
 }
@@ -188,6 +184,7 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     new_reserve.is_initialized = true;
     new_reserve.lending_market = *lending_market_info.key;
     new_reserve.liquidity_supply = *liquidity_supply_info.key;
+    new_reserve.liquidity_mint = liquidity_supply.mint;
     new_reserve.collateral_supply = *collateral_supply_info.key;
     new_reserve.collateral_mint = *collateral_mint_info.key;
 
@@ -195,9 +192,12 @@ fn process_init_reserve(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         let liquidity_supply = &unpack_token_account(&liquidity_supply_info.data.borrow())?;
         let collateral_mint = &unpack_mint(&collateral_mint_info.data.borrow())?;
         new_reserve.update_cumulative_rate(clock, &liquidity_supply);
-        let collateral_over_liquidity_rate =
-            new_reserve.collateral_over_liquidity_rate(clock, liquidity_supply, collateral_mint)?;
-        collateral_over_liquidity_rate * Decimal::from(liquidity_supply.amount)
+        new_reserve.liquidity_to_collateral(
+            clock,
+            liquidity_supply,
+            collateral_mint,
+            liquidity_supply.amount,
+        )?
     };
 
     spl_token_mint_to(TokenMintToParams {
@@ -289,10 +289,12 @@ fn process_deposit(
     let liquidity_supply = &unpack_token_account(&liquidity_supply_info.data.borrow())?;
     let collateral_mint = &unpack_mint(&collateral_mint_info.data.borrow())?;
     reserve.update_cumulative_rate(clock, liquidity_supply);
-    let collateral_over_liquidity_rate =
-        reserve.collateral_over_liquidity_rate(clock, liquidity_supply, collateral_mint)?;
-    let collateral_amount: Decimal =
-        collateral_over_liquidity_rate * Decimal::from(liquidity_amount);
+    let collateral_amount = reserve.liquidity_to_collateral(
+        clock,
+        liquidity_supply,
+        collateral_mint,
+        liquidity_amount,
+    )?;
 
     spl_token_transfer(TokenTransferParams {
         source: liquidity_input_info.clone(),
@@ -356,10 +358,12 @@ fn process_withdraw(
     let collateral_mint = &unpack_mint(&collateral_mint_info.data.borrow())?;
 
     reserve.update_cumulative_rate(clock, liquidity_supply);
-    let collateral_over_liquidity_rate =
-        reserve.collateral_over_liquidity_rate(clock, liquidity_supply, collateral_mint)?;
-    let liquidity_withdraw_amount: Decimal =
-        Decimal::from(collateral_amount) / collateral_over_liquidity_rate;
+    let liquidity_withdraw_amount = reserve.collateral_to_liquidity(
+        clock,
+        liquidity_supply,
+        collateral_mint,
+        collateral_amount,
+    )?;
 
     spl_token_transfer(TokenTransferParams {
         source: liquidity_supply_info.clone(),
@@ -386,6 +390,17 @@ fn process_withdraw(
     Ok(())
 }
 
+enum Side {
+    Bid,
+    Ask,
+}
+
+#[derive(PartialEq)]
+enum Fill {
+    Base,
+    Quote,
+}
+
 #[inline(never)] // avoid stack frame limit
 fn process_borrow(
     program_id: &Pubkey,
@@ -393,17 +408,22 @@ fn process_borrow(
     accounts: &[AccountInfo],
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
-    let deposit_reserve_info = next_account_info(account_info_iter)?;
-    let borrow_reserve_info = next_account_info(account_info_iter)?;
-    let lending_market_authority_info = next_account_info(account_info_iter)?;
-    let liquidity_supply_info = next_account_info(account_info_iter)?;
-    let liquidity_output_info = next_account_info(account_info_iter)?;
     let collateral_input_info = next_account_info(account_info_iter)?;
-    let collateral_supply_info = next_account_info(account_info_iter)?;
+    let liquidity_output_info = next_account_info(account_info_iter)?;
+    let deposit_reserve_info = next_account_info(account_info_iter)?;
+    let deposit_reserve_collateral_mint_info = next_account_info(account_info_iter)?;
+    let deposit_reserve_collateral_supply_info = next_account_info(account_info_iter)?;
+    let deposit_reserve_liquidity_supply_info = next_account_info(account_info_iter)?;
+    let borrow_reserve_info = next_account_info(account_info_iter)?;
+    let borrow_reserve_liquidity_supply_info = next_account_info(account_info_iter)?;
     let obligation_info = next_account_info(account_info_iter)?;
     let obligation_token_mint_info = next_account_info(account_info_iter)?;
     let obligation_token_output_info = next_account_info(account_info_iter)?;
     let obligation_token_owner_info = next_account_info(account_info_iter)?;
+    let lending_market_authority_info = next_account_info(account_info_iter)?;
+    let dex_market_info = next_account_info(account_info_iter)?;
+    let dex_market_orders_info = next_account_info(account_info_iter)?;
+    let memory = next_account_info(account_info_iter)?;
     let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
     let rent_info = next_account_info(account_info_iter)?;
     let rent = &Rent::from_account_info(rent_info)?;
@@ -416,15 +436,16 @@ fn process_borrow(
 
     let deposit_reserve = ReserveInfo::unpack(&deposit_reserve_info.data.borrow())?;
     let mut borrow_reserve = ReserveInfo::unpack(&borrow_reserve_info.data.borrow())?;
-    let collateral_supply = unpack_token_account(&collateral_supply_info.data.borrow())?;
+    let deposit_reserve_collateral_supply =
+        unpack_token_account(&deposit_reserve_collateral_supply_info.data.borrow())?;
 
     if deposit_reserve.lending_market != borrow_reserve.lending_market {
         return Err(LendingError::LendingMarketMismatch.into());
     }
-    if &borrow_reserve.liquidity_supply != liquidity_supply_info.key {
+    if &borrow_reserve.liquidity_supply != borrow_reserve_liquidity_supply_info.key {
         return Err(LendingError::InvalidInput.into());
     }
-    if deposit_reserve.collateral_mint != collateral_supply.mint {
+    if deposit_reserve.collateral_mint != deposit_reserve_collateral_supply.mint {
         return Err(LendingError::InvalidInput.into());
     }
 
@@ -433,7 +454,7 @@ fn process_borrow(
 
     spl_token_transfer(TokenTransferParams {
         source: collateral_input_info.clone(),
-        destination: collateral_supply_info.clone(),
+        destination: deposit_reserve_collateral_supply_info.clone(),
         amount: collateral_amount,
         authority: lending_market_authority_info.clone(),
         authorized: &lending_market_key,
@@ -441,26 +462,45 @@ fn process_borrow(
         token_program: token_program_id.clone(),
     })?;
 
-    let deposit_token_price = Decimal::from(deposit_reserve.current_dex_market_price(clock)?);
-    let borrow_token_price = Decimal::from(borrow_reserve.current_dex_market_price(clock)?);
-    let collateral_value: Decimal = Decimal::from(collateral_amount) * deposit_token_price;
-    let borrow_amount: Decimal = collateral_value / borrow_token_price;
+    // TODO: handle case when neither reserve is the quote currency
+    // TODO: verify the orders account
+
+    let deposit_reserve_liquidity_supply =
+        &unpack_token_account(&deposit_reserve_liquidity_supply_info.data.borrow())?;
+    let deposit_reserve_collateral_mint =
+        &unpack_mint(&deposit_reserve_collateral_mint_info.data.borrow())?;
+    let deposit_amount = deposit_reserve
+        .collateral_to_liquidity(
+            clock,
+            deposit_reserve_liquidity_supply,
+            deposit_reserve_collateral_mint,
+            collateral_amount,
+        )?
+        .round_u64();
+    let borrow_amount = deposit_to_borrow(
+        deposit_amount,
+        memory,
+        dex_market_orders_info,
+        dex_market_info,
+        &deposit_reserve,
+    )?;
+
+    let borrow_reserve_liquidity_supply =
+        &unpack_token_account(&borrow_reserve_liquidity_supply_info.data.borrow())?;
+    let cumulative_borrow_rate =
+        borrow_reserve.update_cumulative_rate(clock, borrow_reserve_liquidity_supply);
 
     spl_token_transfer(TokenTransferParams {
-        source: liquidity_supply_info.clone(),
+        source: borrow_reserve_liquidity_supply_info.clone(),
         destination: liquidity_output_info.clone(),
-        amount: borrow_amount.round_u64(),
+        amount: borrow_amount,
         authority: lending_market_authority_info.clone(),
         authorized: &lending_market_key,
         bump_seed,
         token_program: token_program_id.clone(),
     })?;
 
-    let borrow_reserve_liquidity_supply =
-        &unpack_token_account(&liquidity_supply_info.data.borrow())?;
-    let cumulative_borrow_rate =
-        borrow_reserve.update_cumulative_rate(clock, borrow_reserve_liquidity_supply);
-    borrow_reserve.add_borrow(borrow_amount);
+    borrow_reserve.add_borrow(Decimal::from(borrow_amount));
     ReserveInfo::pack(borrow_reserve, &mut borrow_reserve_info.data.borrow_mut())?;
 
     if obligation_token_mint_info.owner != token_program_id.key {
@@ -473,11 +513,9 @@ fn process_borrow(
     assert_uninitialized::<Mint>(obligation_token_mint_info)?;
     assert_uninitialized::<Token>(obligation_token_output_info)?;
 
-    let lending_market_authority =
-        &authority_id(program_id, &deposit_reserve.lending_market, bump_seed)?;
     spl_token_init_mint(TokenInitializeMintParams {
         mint: obligation_token_mint_info.clone(),
-        authority: lending_market_authority,
+        authority: lending_market_authority_info.key,
         rent: rent_info.clone(),
         token_program: token_program_id.clone(),
     })?;
@@ -493,7 +531,7 @@ fn process_borrow(
     spl_token_mint_to(TokenMintToParams {
         mint: obligation_token_mint_info.clone(),
         destination: obligation_token_output_info.clone(),
-        amount: collateral_amount,
+        amount: deposit_amount,
         authority: lending_market_authority_info.clone(),
         authorized: &deposit_reserve.lending_market,
         bump_seed,
@@ -505,7 +543,7 @@ fn process_borrow(
     new_obligation.collateral_amount = collateral_amount;
     new_obligation.collateral_supply = *deposit_reserve_info.key;
     new_obligation.cumulative_borrow_rate = cumulative_borrow_rate;
-    new_obligation.borrow_amount = borrow_amount;
+    new_obligation.borrow_amount = Decimal::from(borrow_amount);
     new_obligation.borrow_reserve = *borrow_reserve_info.key;
     new_obligation.token_mint = *obligation_token_mint_info.key;
     ObligationInfo::pack(new_obligation, &mut obligation_info.data.borrow_mut())?;
@@ -615,94 +653,6 @@ fn process_repay(
 
     repay_reserve.subtract_repay(Decimal::from(repay_amount));
     ReserveInfo::pack(repay_reserve, &mut repay_reserve_info.data.borrow_mut())?;
-
-    Ok(())
-}
-
-fn process_set_price(accounts: &[AccountInfo]) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    let reserve_info = next_account_info(account_info_iter)?;
-    let dex_market_info = next_account_info(account_info_iter)?;
-    let dex_market_bids_info = next_account_info(account_info_iter)?;
-    let dex_market_asks_info = next_account_info(account_info_iter)?;
-    let clock = &Clock::from_account_info(next_account_info(account_info_iter)?)?;
-    let memory = next_account_info(account_info_iter)?;
-
-    let mut reserve = ReserveInfo::unpack(&reserve_info.data.borrow())?;
-    if reserve.dex_market != COption::Some(*dex_market_info.key) {
-        return Err(LendingError::InvalidInput.into());
-    }
-
-    fn load_bids_pubkey(data: &[u8]) -> Pubkey {
-        let count_start = 5 + 35 * 8;
-        let count_end = count_start + 32;
-        Pubkey::new(&data[count_start..count_end])
-    }
-
-    fn load_asks_pubkey(data: &[u8]) -> Pubkey {
-        let count_start = 5 + 39 * 8;
-        let count_end = count_start + 32;
-        Pubkey::new(&data[count_start..count_end])
-    }
-
-    let bids_pubkey = &load_bids_pubkey(&dex_market_info.data.borrow());
-    let asks_pubkey = &load_asks_pubkey(&dex_market_info.data.borrow());
-
-    if dex_market_bids_info.key != bids_pubkey {
-        return Err(LendingError::InvalidInput.into());
-    }
-    if dex_market_asks_info.key != asks_pubkey {
-        return Err(LendingError::InvalidInput.into());
-    }
-
-    enum Side {
-        Bid,
-        Ask,
-    }
-
-    fn find_best_order(
-        orders: &AccountInfo,
-        memory: &AccountInfo,
-        side: Side,
-    ) -> Result<u64, ProgramError> {
-        let mut memory = memory.data.borrow_mut();
-        {
-            let bytes = orders.data.borrow();
-            let start = 5 + 8;
-            let end = bytes.len() - 7;
-            fast_copy(&bytes[start..end], &mut memory);
-        }
-
-        let bytes = std::cell::RefCell::new(memory);
-        let mut order_slab = RefMut::map(bytes.borrow_mut(), |bytes| Slab::new(bytes));
-
-        let best_order = match side {
-            Side::Bid => order_slab.find_max(),
-            Side::Ask => order_slab.find_min(),
-        }
-        .ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
-        let best_order_ref = order_slab
-            .get_mut(best_order)
-            .unwrap()
-            .as_leaf_mut()
-            .unwrap();
-        Ok(best_order_ref.price().into())
-    }
-
-    let best_bid = find_best_order(dex_market_bids_info, memory, Side::Bid)?;
-    let best_ask = find_best_order(dex_market_asks_info, memory, Side::Ask)?;
-
-    info!(&format!(
-        "bid: {}, ask: {}, market: {}",
-        best_bid,
-        best_ask,
-        (best_bid + best_ask) / 2
-    ));
-    fast_set(&mut memory.data.borrow_mut(), 0);
-
-    reserve.dex_market_price = (best_bid + best_ask) / 2;
-    reserve.dex_market_price_updated_slot = clock.slot;
-    ReserveInfo::pack(reserve, &mut reserve_info.data.borrow_mut())?;
 
     Ok(())
 }
@@ -973,4 +923,81 @@ fn fast_set(mut dst: &mut [u8], val: u8) {
     for i in dst {
         *i = val
     }
+}
+
+#[inline]
+fn next_order<'a>(
+    orders: &'a mut RefMut<Slab>,
+    side: &Side,
+) -> Result<&'a mut AnyNode, ProgramError> {
+    let index = match side {
+        Side::Bid => orders.find_max(),
+        Side::Ask => orders.find_min(),
+    }
+    .ok_or_else(|| ProgramError::from(LendingError::InvalidInput))?;
+    Ok(orders.get_mut(index).unwrap())
+}
+
+fn exchange_with_order_book(
+    mut orders: RefMut<Slab>,
+    side: Side,
+    fill: Fill,
+    mut input_quantity: u64,
+) -> Result<u64, ProgramError> {
+    let mut output_quantity = Decimal::from(0);
+    while input_quantity > 0 {
+        let next_order_node = next_order(&mut orders, &side)?;
+        let next_order = next_order_node.as_leaf_mut().unwrap();
+
+        let mut base_quantity = next_order.quantity();
+        let mut quote_quantity = base_quantity * next_order.price().get();
+
+        if fill == Fill::Base {
+            std::mem::swap(&mut base_quantity, &mut quote_quantity);
+        }
+
+        let fill_quantity = input_quantity.min(quote_quantity);
+        input_quantity -= fill_quantity;
+        output_quantity += Decimal::from(fill_quantity) * Decimal::from(base_quantity)
+            / Decimal::from(quote_quantity);
+    }
+
+    Ok(output_quantity.round_u64())
+}
+
+fn align_orders<'a>(orders: &AccountInfo, memory: &'a AccountInfo) -> RefMut<'a, Slab> {
+    let mut memory = memory.data.borrow_mut();
+    {
+        let bytes = orders.data.borrow();
+        let start = 5 + 8;
+        let end = bytes.len() - 7;
+        fast_copy(&bytes[start..end], &mut memory);
+    }
+
+    RefMut::map(memory, |bytes| Slab::new(bytes))
+}
+
+fn quote_mint_pubkey(data: &[u8]) -> Pubkey {
+    let count_start = 5 + 10 * 8;
+    let count_end = count_start + 32;
+    Pubkey::new(&data[count_start..count_end])
+}
+
+fn deposit_to_borrow(
+    deposit_amount: u64,
+    memory: &AccountInfo,
+    dex_market_orders_info: &AccountInfo,
+    dex_market_info: &AccountInfo,
+    deposit_reserve: &ReserveInfo,
+) -> Result<u64, ProgramError> {
+    let orders = align_orders(dex_market_orders_info, memory);
+    let market_quote_mint = quote_mint_pubkey(&dex_market_info.data.borrow());
+    let (fill, side) = if deposit_reserve.liquidity_mint == market_quote_mint {
+        (Fill::Quote, Side::Bid)
+    } else {
+        (Fill::Base, Side::Ask)
+    };
+    let borrow_amount = exchange_with_order_book(orders, side, fill, deposit_amount)?;
+    fast_set(&mut memory.data.borrow_mut(), 0);
+    Ok(borrow_amount)
 }

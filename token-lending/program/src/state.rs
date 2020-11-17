@@ -43,6 +43,8 @@ pub struct ReserveInfo {
     pub lending_market: Pubkey,
     /// Reserve liquidity supply
     pub liquidity_supply: Pubkey,
+    /// Reserve liquidity mint
+    pub liquidity_mint: Pubkey,
     /// Reserve collateral supply
     /// Collateral is stored rather than burned to keep an accurate total collateral supply
     pub collateral_supply: Pubkey,
@@ -58,9 +60,9 @@ pub struct ReserveInfo {
     pub dex_market_price_updated_slot: u64,
 
     /// Cumulative borrow rate
-    cumulative_borrow_rate: Decimal,
+    pub cumulative_borrow_rate: Decimal,
     /// Total borrows, plus interest
-    total_borrows: Decimal,
+    pub total_borrows: Decimal,
     /// Last slot when borrow state was updated
     pub borrow_state_update_slot: u64,
 }
@@ -89,40 +91,47 @@ impl ReserveInfo {
         self.total_borrows -= repay_amount;
     }
 
+    /// Calculate the current borrow rate
+    pub fn current_borrow_rate(&self, liquidity_supply: &TokenAccount) -> Decimal {
+        let total_liquidity = Decimal::from(liquidity_supply.amount);
+        let total_supply = self.total_borrows + total_liquidity;
+
+        // let zero = Decimal::from(0);
+        // if total_supply == zero {
+        //     return zero;
+        // }
+
+        // Optimize for this utilization rate for stable coins
+        //  increase borrow rate multiplier when utilization is higher
+        let optimal_utilization_rate = Decimal::new(80, 2);
+        let optimal_borrow_rate = Decimal::new(4, 2);
+        let base_borrow_rate = Decimal::new(0, 2);
+        let max_borrow_rate = Decimal::new(30, 2);
+
+        let utilization_rate: Decimal = self.total_borrows / total_supply;
+        if utilization_rate < optimal_utilization_rate {
+            // 50% should be normalized to 5/8 of the way to the optimal borrow rate
+            let normalized_rate = utilization_rate / optimal_utilization_rate;
+            // Borrow rate will then be 5/8 * optimal borrow rate
+            normalized_rate * (optimal_borrow_rate - base_borrow_rate) + base_borrow_rate
+        } else {
+            let normalized_rate = (utilization_rate - optimal_utilization_rate)
+                / (Decimal::from(1) - optimal_utilization_rate);
+            normalized_rate * (max_borrow_rate - optimal_borrow_rate) + optimal_borrow_rate
+        }
+    }
+
     /// Update the cumulative borrow rate for the reserve
     pub fn update_cumulative_rate(
         &mut self,
         clock: &Clock,
         liquidity_supply: &TokenAccount,
     ) -> Decimal {
-        let total_liquidity = Decimal::from(liquidity_supply.amount);
-        let total_supply = self.total_borrows + total_liquidity;
-
         if self.borrow_state_update_slot == 0 {
             self.borrow_state_update_slot = clock.slot;
             self.cumulative_borrow_rate = Decimal::from(1u64);
-        } else if total_supply == Decimal::from(0u64) {
-            self.borrow_state_update_slot = clock.slot;
         } else {
-            // Optimize for this utilization rate for stable coins
-            //  increase borrow rate multiplier when utilization is higher
-            let optimal_utilization_rate = Decimal::new(80, 2);
-            let optimal_borrow_rate = Decimal::new(4, 2);
-            let base_borrow_rate = Decimal::new(0, 2);
-            let max_borrow_rate = Decimal::new(30, 2);
-
-            let utilization_rate: Decimal = self.total_borrows / total_supply;
-            let borrow_rate: Decimal = if utilization_rate < optimal_utilization_rate {
-                // 50% should be normalized to 5/8 of the way to the optimal borrow rate
-                let normalized_rate = utilization_rate / optimal_utilization_rate;
-                // Borrow rate will then be 5/8 * optimal borrow rate
-                normalized_rate * (optimal_borrow_rate - base_borrow_rate) + base_borrow_rate
-            } else {
-                let normalized_rate = (utilization_rate - optimal_utilization_rate)
-                    / (Decimal::from(1) - optimal_utilization_rate);
-                normalized_rate * (max_borrow_rate - optimal_borrow_rate) + optimal_borrow_rate
-            };
-
+            let borrow_rate = self.current_borrow_rate(liquidity_supply);
             let slots_elapsed = Decimal::from(clock.slot - self.borrow_state_update_slot);
             let interest_rate: Decimal =
                 slots_elapsed * borrow_rate / Decimal::from(SLOTS_PER_YEAR);
@@ -136,8 +145,34 @@ impl ReserveInfo {
         self.cumulative_borrow_rate
     }
 
+    /// Convert reserve collateral to liquidity
+    pub fn collateral_to_liquidity(
+        &self,
+        clock: &Clock,
+        liquidity_supply: &TokenAccount,
+        collateral_mint: &Mint,
+        collateral_amount: u64,
+    ) -> Result<Decimal, ProgramError> {
+        let exchange_rate =
+            self.collateral_exchange_rate(clock, liquidity_supply, collateral_mint)?;
+        Ok(Decimal::from(collateral_amount) / exchange_rate)
+    }
+
+    /// Convert reserve liquidity to collateral
+    pub fn liquidity_to_collateral(
+        &self,
+        clock: &Clock,
+        liquidity_supply: &TokenAccount,
+        collateral_mint: &Mint,
+        liquidity_amount: u64,
+    ) -> Result<Decimal, ProgramError> {
+        let exchange_rate =
+            self.collateral_exchange_rate(clock, liquidity_supply, collateral_mint)?;
+        Ok(Decimal::from(liquidity_amount) * exchange_rate)
+    }
+
     /// Return the current collateral exchange rate.
-    pub fn collateral_over_liquidity_rate(
+    fn collateral_exchange_rate(
         &self,
         clock: &Clock,
         liquidity_supply: &TokenAccount,
@@ -213,9 +248,9 @@ impl IsInitialized for ReserveInfo {
     }
 }
 
-const RESERVE_LEN: usize = 221;
+const RESERVE_LEN: usize = 253;
 impl Pack for ReserveInfo {
-    const LEN: usize = 221;
+    const LEN: usize = 253;
 
     /// Unpacks a byte buffer into a [ReserveInfo](struct.ReserveInfo.html).
     fn unpack_from_slice(input: &[u8]) -> Result<Self, ProgramError> {
@@ -225,6 +260,7 @@ impl Pack for ReserveInfo {
             is_initialized,
             lending_market,
             liquidity_supply,
+            liquidity_mint,
             collateral_supply,
             collateral_mint,
             dex_market,
@@ -233,7 +269,7 @@ impl Pack for ReserveInfo {
             cumulative_borrow_rate,
             total_borrows,
             borrow_state_update_slot,
-        ) = array_refs![input, 1, 32, 32, 32, 32, 36, 8, 8, 16, 16, 8];
+        ) = array_refs![input, 1, 32, 32, 32, 32, 32, 36, 8, 8, 16, 16, 8];
         Ok(Self {
             is_initialized: match is_initialized {
                 [0] => false,
@@ -242,6 +278,7 @@ impl Pack for ReserveInfo {
             },
             lending_market: Pubkey::new_from_array(*lending_market),
             liquidity_supply: Pubkey::new_from_array(*liquidity_supply),
+            liquidity_mint: Pubkey::new_from_array(*liquidity_mint),
             collateral_supply: Pubkey::new_from_array(*collateral_supply),
             collateral_mint: Pubkey::new_from_array(*collateral_mint),
             dex_market: unpack_coption_key(dex_market)?,
@@ -259,6 +296,7 @@ impl Pack for ReserveInfo {
             is_initialized,
             lending_market,
             liquidity_supply,
+            liquidity_mint,
             collateral_supply,
             collateral_mint,
             dex_market,
@@ -267,10 +305,11 @@ impl Pack for ReserveInfo {
             cumulative_borrow_rate,
             total_borrows,
             borrow_state_update_slot,
-        ) = mut_array_refs![output, 1, 32, 32, 32, 32, 36, 8, 8, 16, 16, 8];
+        ) = mut_array_refs![output, 1, 32, 32, 32, 32, 32, 36, 8, 8, 16, 16, 8];
         is_initialized[0] = self.is_initialized as u8;
         lending_market.copy_from_slice(self.lending_market.as_ref());
         liquidity_supply.copy_from_slice(self.liquidity_supply.as_ref());
+        liquidity_mint.copy_from_slice(self.liquidity_mint.as_ref());
         collateral_supply.copy_from_slice(self.collateral_supply.as_ref());
         collateral_mint.copy_from_slice(self.collateral_mint.as_ref());
         pack_coption_key(&self.dex_market, dex_market);

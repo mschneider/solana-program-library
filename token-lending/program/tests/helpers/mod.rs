@@ -9,14 +9,13 @@ use spl_token::state::{Account as Token, Mint};
 use spl_token_lending::{
     instruction::{
         borrow_reserve_liquidity, deposit_reserve_liquidity, init_lending_market, init_reserve,
-        set_dex_market_price,
     },
     processor::process_instruction,
     state::{LendingMarketInfo, ObligationInfo, ReserveInfo},
 };
 use std::str::FromStr;
 
-pub fn setup_test() -> (ProgramTest, TestMarket) {
+pub fn setup_test() -> (ProgramTest, TestDexMarket) {
     let mut test = ProgramTest::new(
         "spl_token_lending",
         spl_token_lending::id(),
@@ -29,9 +28,9 @@ pub fn setup_test() -> (ProgramTest, TestMarket) {
         processor!(spl_token::processor::Processor::process),
     );
 
-    let market = TestMarket::setup(&mut test);
+    let dex_market = TestDexMarket::setup(&mut test);
 
-    (test, market)
+    (test, dex_market)
 }
 
 pub struct TestLendingMarket {
@@ -108,13 +107,20 @@ impl TestLendingMarket {
         payer: &Keypair,
         deposit_reserve: &TestReserve,
         borrow_reserve: &TestReserve,
-        amount: u64,
+        collateral_amount: u64,
         obligation_token_owner: Pubkey,
+        dex_market: &TestDexMarket,
     ) -> TestObligation {
         let rent = banks_client.get_rent().await.unwrap();
         let obligation_keypair = Keypair::new();
         let obligation_token_mint_keypair = Keypair::new();
         let obligation_token_account_keypair = Keypair::new();
+        let memory_keypair = Keypair::new();
+        let dex_market_orders_pubkey = if deposit_reserve.dex_market_pubkey.is_some() {
+            dex_market.asks_pubkey
+        } else {
+            dex_market.bids_pubkey
+        };
 
         let mut transaction = Transaction::new_with_payer(
             &[
@@ -139,20 +145,32 @@ impl TestLendingMarket {
                     ObligationInfo::LEN as u64,
                     &spl_token_lending::id(),
                 ),
+                create_account(
+                    &payer.pubkey(),
+                    &memory_keypair.pubkey(),
+                    0,
+                    65528,
+                    &solana_program::system_program::id(),
+                ),
                 borrow_reserve_liquidity(
                     spl_token_lending::id(),
-                    deposit_reserve.pubkey,
-                    borrow_reserve.pubkey,
-                    self.authority_pubkey,
-                    borrow_reserve.liquidity_supply_pubkey,
-                    borrow_reserve.user_token_pubkey,
+                    collateral_amount,
                     deposit_reserve.user_collateral_token_pubkey,
+                    borrow_reserve.user_token_pubkey,
+                    deposit_reserve.pubkey,
+                    deposit_reserve.collateral_mint_pubkey,
+                    deposit_reserve.liquidity_supply_pubkey,
                     deposit_reserve.collateral_supply_pubkey,
-                    amount,
+                    borrow_reserve.pubkey,
+                    borrow_reserve.liquidity_supply_pubkey,
+                    self.authority_pubkey,
                     obligation_keypair.pubkey(),
                     obligation_token_mint_keypair.pubkey(),
                     obligation_token_account_keypair.pubkey(),
                     obligation_token_owner,
+                    dex_market.pubkey,
+                    dex_market_orders_pubkey,
+                    memory_keypair.pubkey(),
                 ),
             ],
             Some(&payer.pubkey()),
@@ -160,11 +178,12 @@ impl TestLendingMarket {
 
         let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
         transaction.sign(
-            &[
+            &vec![
                 payer,
                 &obligation_keypair,
                 &obligation_token_account_keypair,
                 &obligation_token_mint_keypair,
+                &memory_keypair,
             ],
             recent_blockhash,
         );
@@ -211,6 +230,7 @@ pub struct TestReserve {
     pub liquidity_supply_pubkey: Pubkey,
     pub collateral_mint_pubkey: Pubkey,
     pub collateral_supply_pubkey: Pubkey,
+    pub dex_market_pubkey: Option<Pubkey>,
 }
 
 impl TestReserve {
@@ -222,7 +242,7 @@ impl TestReserve {
         user_amount: Option<u64>,
         reserve_amount: u64,
         token_mint_authority: Option<&Keypair>,
-        market: &TestMarket,
+        dex_market: &TestDexMarket,
     ) -> Self {
         let keypair = Keypair::new();
         let pubkey = keypair.pubkey();
@@ -239,37 +259,42 @@ impl TestReserve {
         )
         .await;
 
-        let liquidity_supply_pubkey = if let Some(token_mint_authority) = token_mint_authority {
-            let liquidity_supply_pubkey = create_token_account(
-                banks_client,
-                token_mint_pubkey,
-                &payer,
-                Some(lending_market.authority_pubkey),
-                None,
-            )
-            .await;
+        // TODO: this assumes that any non-native token account is the quote currency
+        let (liquidity_supply_pubkey, dex_market_pubkey) =
+            if let Some(token_mint_authority) = token_mint_authority {
+                let liquidity_supply_pubkey = create_token_account(
+                    banks_client,
+                    token_mint_pubkey,
+                    &payer,
+                    Some(lending_market.authority_pubkey),
+                    None,
+                )
+                .await;
 
-            mint_to(
-                banks_client,
-                token_mint_pubkey,
-                &payer,
-                liquidity_supply_pubkey,
-                token_mint_authority,
-                reserve_amount,
-            )
-            .await;
+                mint_to(
+                    banks_client,
+                    token_mint_pubkey,
+                    &payer,
+                    liquidity_supply_pubkey,
+                    token_mint_authority,
+                    reserve_amount,
+                )
+                .await;
 
-            liquidity_supply_pubkey
-        } else {
-            create_token_account(
-                banks_client,
-                token_mint_pubkey,
-                &payer,
-                Some(lending_market.authority_pubkey),
-                Some(reserve_amount),
-            )
-            .await
-        };
+                (liquidity_supply_pubkey, None)
+            } else {
+                (
+                    create_token_account(
+                        banks_client,
+                        token_mint_pubkey,
+                        &payer,
+                        Some(lending_market.authority_pubkey),
+                        Some(reserve_amount),
+                    )
+                    .await,
+                    Some(dex_market.pubkey),
+                )
+            };
 
         let rent = banks_client.get_rent().await.unwrap();
         let mut transaction = Transaction::new_with_payer(
@@ -310,7 +335,7 @@ impl TestReserve {
                     collateral_mint_keypair.pubkey(),
                     collateral_supply_keypair.pubkey(),
                     user_collateral_token_keypair.pubkey(),
-                    Some(market.pubkey),
+                    dex_market_pubkey,
                 ),
             ],
             Some(&payer.pubkey()),
@@ -338,6 +363,7 @@ impl TestReserve {
             liquidity_supply_pubkey,
             collateral_supply_pubkey: collateral_supply_keypair.pubkey(),
             collateral_mint_pubkey: collateral_mint_keypair.pubkey(),
+            dex_market_pubkey,
         }
     }
 
@@ -351,7 +377,7 @@ impl TestReserve {
     }
 }
 
-pub struct TestMarket {
+pub struct TestDexMarket {
     pub pubkey: Pubkey,
     pub price: u64,
     pub bids_pubkey: Pubkey,
@@ -360,9 +386,9 @@ pub struct TestMarket {
     pub usdc_mint_authority: Keypair,
 }
 
-impl TestMarket {
-    pub fn setup(test: &mut ProgramTest) -> TestMarket {
-        let price = 2204; // USDC (3 decimals) per SOL
+impl TestDexMarket {
+    pub fn setup(test: &mut ProgramTest) -> TestDexMarket {
+        let price = 2210; // USDC (3 decimals) per SOL
         let pubkey = Pubkey::new_unique();
         test.add_account_with_file_data(
             pubkey,
@@ -413,41 +439,6 @@ impl TestMarket {
             usdc_mint_authority,
             asks_pubkey,
         }
-    }
-
-    pub async fn set_price(
-        &self,
-        banks_client: &mut BanksClient,
-        reserve_pubkey: Pubkey,
-        payer: &Keypair,
-    ) {
-        let memory_keypair = Keypair::new();
-        let memory_pubkey = memory_keypair.pubkey();
-        let mut transaction = Transaction::new_with_payer(
-            &[
-                create_account(
-                    &payer.pubkey(),
-                    &memory_pubkey,
-                    0,
-                    65528,
-                    &solana_program::system_program::id(),
-                ),
-                set_dex_market_price(
-                    spl_token_lending::id(),
-                    reserve_pubkey,
-                    self.pubkey,
-                    self.bids_pubkey,
-                    self.asks_pubkey,
-                    memory_pubkey,
-                ),
-            ],
-            Some(&payer.pubkey()),
-        );
-
-        let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
-        transaction.sign(&[&payer, &memory_keypair], recent_blockhash);
-
-        assert_matches!(banks_client.process_transaction(transaction).await, Ok(()));
     }
 }
 

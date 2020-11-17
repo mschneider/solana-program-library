@@ -22,6 +22,10 @@ impl Decimal {
         U256::from(1_000_000_000_000_000_000u64)
     }
 
+    fn half_scaler() -> U256 {
+        U256::from(500_000_000_000_000_000u64)
+    }
+
     /// Create scaled decimal from value and scale
     pub fn new(val: u64, scale: usize) -> Self {
         assert!(scale <= SCALE);
@@ -40,7 +44,7 @@ impl Decimal {
 
     /// Round scaled decimal to u64
     pub fn round_u64(&self) -> u64 {
-        (self.0 / Self::scaler()).as_u64()
+        ((Self::half_scaler() + self.0) / Self::scaler()).as_u64()
     }
 }
 

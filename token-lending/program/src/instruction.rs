@@ -109,15 +109,6 @@ pub enum LendingInstruction {
         /// Amount of loan to repay
         liquidity_amount: u64,
     },
-
-    /// Set the market price of a reserve from DEX market accounts.
-    ///
-    ///   0. `[writable]` Reserve account.
-    ///   1. `[]` Serum DEX market account. Must be initialized and match reserve market account.
-    ///   3. `[]` Serum DEX market bids. Must be initialized and match dex market.
-    ///   2. `[]` Serum DEX market asks. Must be initialized and match dex market.
-    ///   4. `[]` Clock sysvar
-    SetDexMarketPrice,
 }
 
 impl LendingInstruction {
@@ -145,7 +136,6 @@ impl LendingInstruction {
                 let (liquidity_amount, _rest) = Self::unpack_u64(rest)?;
                 Self::RepayReserveLiquidity { liquidity_amount }
             }
-            6 => Self::SetDexMarketPrice,
             _ => return Err(LendingError::InvalidInstruction.into()),
         })
     }
@@ -190,9 +180,6 @@ impl LendingInstruction {
                 buf.push(5);
                 buf.extend_from_slice(&liquidity_amount.to_le_bytes());
             }
-            Self::SetDexMarketPrice => {
-                buf.push(6);
-            }
         }
         buf
     }
@@ -226,7 +213,7 @@ pub fn init_reserve(
     collateral_mint_pubkey: Pubkey,
     collateral_supply_pubkey: Pubkey,
     collateral_output_pubkey: Pubkey,
-    market_pubkey: Option<Pubkey>,
+    dex_market_pubkey: Option<Pubkey>,
 ) -> Instruction {
     let (lending_market_authority_pubkey, _bump_seed) =
         Pubkey::find_program_address(&[&lending_market_pubkey.to_bytes()[..32]], &program_id);
@@ -243,8 +230,8 @@ pub fn init_reserve(
         AccountMeta::new_readonly(spl_token::id(), false),
     ];
 
-    if let Some(market_pubkey) = market_pubkey {
-        accounts.push(AccountMeta::new_readonly(market_pubkey, false));
+    if let Some(dex_market_pubkey) = dex_market_pubkey {
+        accounts.push(AccountMeta::new_readonly(dex_market_pubkey, false));
     }
 
     Instruction {
@@ -314,33 +301,43 @@ pub fn withdraw_reserve_liquidity(
 #[allow(clippy::too_many_arguments)]
 pub fn borrow_reserve_liquidity(
     program_id: Pubkey,
-    deposit_reserve_pubkey: Pubkey,
-    borrow_reserve_pubkey: Pubkey,
-    lending_market_authority_pubkey: Pubkey,
-    liquidity_supply_pubkey: Pubkey,
-    liquidity_output_pubkey: Pubkey,
-    collateral_input_pubkey: Pubkey,
-    collateral_supply_pubkey: Pubkey,
     collateral_amount: u64,
+    collateral_input_pubkey: Pubkey,
+    liquidity_output_pubkey: Pubkey,
+    deposit_reserve_pubkey: Pubkey,
+    deposit_reserve_collateral_mint_pubkey: Pubkey,
+    deposit_reserve_liquidity_supply_pubkey: Pubkey,
+    deposit_reserve_collateral_supply_pubkey: Pubkey,
+    borrow_reserve_pubkey: Pubkey,
+    borrow_reserve_liquidity_supply_pubkey: Pubkey,
+    lending_market_authority_pubkey: Pubkey,
     obligation_pubkey: Pubkey,
     obligation_token_mint_pubkey: Pubkey,
     obligation_token_output_pubkey: Pubkey,
     obligation_token_owner_pubkey: Pubkey,
+    dex_market_pubkey: Pubkey,
+    dex_market_orders_pubkey: Pubkey,
+    memory_pubkey: Pubkey,
 ) -> Instruction {
     Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(deposit_reserve_pubkey, false),
-            AccountMeta::new(borrow_reserve_pubkey, false),
-            AccountMeta::new_readonly(lending_market_authority_pubkey, false),
-            AccountMeta::new(liquidity_supply_pubkey, false),
-            AccountMeta::new(liquidity_output_pubkey, false),
             AccountMeta::new(collateral_input_pubkey, false),
-            AccountMeta::new(collateral_supply_pubkey, false),
+            AccountMeta::new(liquidity_output_pubkey, false),
+            AccountMeta::new_readonly(deposit_reserve_pubkey, false),
+            AccountMeta::new_readonly(deposit_reserve_collateral_mint_pubkey, false),
+            AccountMeta::new(deposit_reserve_collateral_supply_pubkey, false),
+            AccountMeta::new_readonly(deposit_reserve_liquidity_supply_pubkey, false),
+            AccountMeta::new(borrow_reserve_pubkey, false),
+            AccountMeta::new(borrow_reserve_liquidity_supply_pubkey, false),
             AccountMeta::new(obligation_pubkey, false),
             AccountMeta::new(obligation_token_mint_pubkey, false),
             AccountMeta::new(obligation_token_output_pubkey, false),
             AccountMeta::new_readonly(obligation_token_owner_pubkey, false),
+            AccountMeta::new_readonly(lending_market_authority_pubkey, false),
+            AccountMeta::new_readonly(dex_market_pubkey, false),
+            AccountMeta::new_readonly(dex_market_orders_pubkey, false),
+            AccountMeta::new_readonly(memory_pubkey, false),
             AccountMeta::new_readonly(sysvar::clock::id(), false),
             AccountMeta::new_readonly(sysvar::rent::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false),
@@ -382,28 +379,5 @@ pub fn repay_reserve_liquidity(
             AccountMeta::new_readonly(spl_token::id(), false),
         ],
         data: LendingInstruction::RepayReserveLiquidity { liquidity_amount }.pack(),
-    }
-}
-
-/// Creates a `SetDexMarketPrice` instruction
-pub fn set_dex_market_price(
-    program_id: Pubkey,
-    reserve_pubkey: Pubkey,
-    dex_market_pubkey: Pubkey,
-    dex_market_bids_pubkey: Pubkey,
-    dex_market_asks_pubkey: Pubkey,
-    memory_pubkey: Pubkey,
-) -> Instruction {
-    Instruction {
-        program_id,
-        accounts: vec![
-            AccountMeta::new(reserve_pubkey, false),
-            AccountMeta::new_readonly(dex_market_pubkey, false),
-            AccountMeta::new_readonly(dex_market_bids_pubkey, false),
-            AccountMeta::new_readonly(dex_market_asks_pubkey, false),
-            AccountMeta::new_readonly(sysvar::clock::id(), false),
-            AccountMeta::new(memory_pubkey, false),
-        ],
-        data: LendingInstruction::SetDexMarketPrice.pack(),
     }
 }
