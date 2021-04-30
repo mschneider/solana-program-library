@@ -105,7 +105,9 @@ pub fn process_execute(program_id: &Pubkey, accounts: &[AccountInfo]) -> Program
         Ok(val) => val,
         Err(_) => return Err(GovernanceError::InstructionUnpackError.into()),
     };
-    let serialized_instructions = message.serialize_instructions();
+
+    // TODO: Once demote_sysvar_write_locks features is enabled we should pass true
+    let serialized_instructions = message.serialize_instructions(false);
     let instruction: Instruction =
         match Message::deserialize_instruction(0, &serialized_instructions) {
             Ok(val) => val,
