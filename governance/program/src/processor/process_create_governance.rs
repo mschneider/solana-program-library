@@ -47,17 +47,16 @@ pub fn process_create_governance(
         return Err(GovernanceError::InvalidGovernanceKey.into());
     }
 
-   // return Ok(());
-
     // Assert current program upgrade authority signed the transaction as a temp. workaround until we can set_upgrade_authority via CPI.
     // Even though it doesn't transfer authority to the governance at the creation time it prevents from creating governance for programs owned by somebody else
     // After governance is created upgrade authority can be transferred to governance using CLI call.
-    // assert_program_upgrade_authority(
-    //     &governance_key,
-    //     governed_program_info.key,
-    //     governed_program_data_info,
-    //     governed_program_upgrade_authority_info,
-    // )?;
+
+    assert_program_upgrade_authority(
+        &governance_key,
+        governed_program_info.key,
+        governed_program_data_info,
+        governed_program_upgrade_authority_info,
+    )?;
 
     // TODO: Uncomment once PR to allow set_upgrade_authority via CPI calls is released  https://github.com/solana-labs/solana/pull/16676
     // let set_upgrade_authority_ix = bpf_loader_upgradeable::set_upgrade_authority(
