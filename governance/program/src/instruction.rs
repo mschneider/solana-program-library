@@ -1,7 +1,13 @@
 use crate::state::enums::Vote;
 use std::{convert::TryInto, mem::size_of};
 
-use solana_program::program_error::ProgramError;
+use solana_program::{
+    bpf_loader_upgradeable,
+    instruction::{AccountMeta, Instruction},
+    program_error::ProgramError,
+    pubkey::Pubkey,
+    system_program,
+};
 
 use crate::{
     error::GovernanceError,
@@ -268,6 +274,9 @@ pub enum GovernanceInstruction {
     ///   3. `[]` Payer
     ///   5. `[]` System account.
     CreateEmptyGovernanceVoteRecord,
+
+    /// Creates empty account
+    CreateGovAccount,
 }
 
 impl GovernanceInstruction {
@@ -351,6 +360,7 @@ impl GovernanceInstruction {
                 }
             }
             14 => Self::CreateEmptyGovernanceVoteRecord,
+            15 => Self::CreateGovAccount,
             _ => return Err(GovernanceError::InstructionUnpackError.into()),
         })
     }
@@ -490,7 +500,51 @@ impl GovernanceInstruction {
                 buf.extend_from_slice(&voting_token_amount.to_le_bytes());
             }
             Self::CreateEmptyGovernanceVoteRecord => buf.push(14),
+            Self::CreateGovAccount => buf.push(15),
         }
         buf
     }
+}
+
+/// Creates CreateGovernance instruction
+pub fn create_governance(
+    program_id: &Pubkey,
+    vote_threshold: u8,
+    minimum_slot_waiting_period: u64,
+    time_limit: u64,
+    name: [u8; GOVERNANCE_NAME_LENGTH],
+) -> Result<Instruction, ProgramError> {
+    let accounts = vec![
+        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new_readonly(bpf_loader_upgradeable::id(), false),
+    ];
+
+    let instruction = GovernanceInstruction::CreateGovernance {
+        vote_threshold,
+        minimum_slot_waiting_period,
+        time_limit,
+        name,
+    };
+
+    Ok(Instruction {
+        program_id: *program_id,
+        accounts,
+        data: instruction.pack(),
+    })
+}
+
+/// Create Gov Account
+pub fn create_gov_account(program_id: &Pubkey) -> Result<Instruction, ProgramError> {
+    let accounts = vec![
+        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new_readonly(bpf_loader_upgradeable::id(), false),
+    ];
+
+    let instruction = GovernanceInstruction::CreateGovAccount {};
+
+    Ok(Instruction {
+        program_id: *program_id,
+        accounts,
+        data: instruction.pack(),
+    })
 }
