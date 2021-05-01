@@ -19,4 +19,4 @@ pub use solana_program;
 solana_program::declare_id!("Governance111111111111111111111111111111111");
 
 /// Seed for governance authority
-const PROGRAM_AUTHORITY_SEED: &[u8] = b"governance";
+pub const PROGRAM_AUTHORITY_SEED: &[u8] = b"governance";

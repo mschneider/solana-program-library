@@ -11,6 +11,7 @@ use solana_program::{
 
 use crate::{
     error::GovernanceError,
+    id,
     state::{
         custom_single_signer_transaction::MAX_INSTRUCTION_DATA,
         governance::GOVERNANCE_NAME_LENGTH,
@@ -275,8 +276,9 @@ pub enum GovernanceInstruction {
     ///   5. `[]` System account.
     CreateEmptyGovernanceVoteRecord,
 
-    /// Creates empty account
-    CreateGovAccount,
+    /// Creates dummy account for testing
+    /// TODO: Remove in final version
+    CreateDummyAccount,
 }
 
 impl GovernanceInstruction {
@@ -360,7 +362,7 @@ impl GovernanceInstruction {
                 }
             }
             14 => Self::CreateEmptyGovernanceVoteRecord,
-            15 => Self::CreateGovAccount,
+            15 => Self::CreateDummyAccount,
             _ => return Err(GovernanceError::InstructionUnpackError.into()),
         })
     }
@@ -500,7 +502,7 @@ impl GovernanceInstruction {
                 buf.extend_from_slice(&voting_token_amount.to_le_bytes());
             }
             Self::CreateEmptyGovernanceVoteRecord => buf.push(14),
-            Self::CreateGovAccount => buf.push(15),
+            Self::CreateDummyAccount => buf.push(15),
         }
         buf
     }
@@ -508,42 +510,58 @@ impl GovernanceInstruction {
 
 /// Creates CreateGovernance instruction
 pub fn create_governance(
-    program_id: &Pubkey,
+    governance_key: &Pubkey,
+    governed_program_key: &Pubkey,
+    governed_program_data_key: &Pubkey,
+    governed_program_upgrade_authority_key: &Pubkey,
+    governance_mint_key: &Pubkey,
+    payer_key: &Pubkey,
+    council_mint_key: &Option<Pubkey>,
     vote_threshold: u8,
     minimum_slot_waiting_period: u64,
     time_limit: u64,
-    name: [u8; GOVERNANCE_NAME_LENGTH],
+    name: &[u8; GOVERNANCE_NAME_LENGTH],
 ) -> Result<Instruction, ProgramError> {
-    let accounts = vec![
+    let mut accounts = vec![
+        AccountMeta::new(*governance_key, false),
+        AccountMeta::new_readonly(*governed_program_key, false),
+        AccountMeta::new(*governed_program_data_key, false),
+        AccountMeta::new_readonly(*governed_program_upgrade_authority_key, true),
+        AccountMeta::new_readonly(*governance_mint_key, false),
+        AccountMeta::new_readonly(*payer_key, true),
         AccountMeta::new_readonly(system_program::id(), false),
         AccountMeta::new_readonly(bpf_loader_upgradeable::id(), false),
     ];
+
+    if let Some(council_mint_key) = council_mint_key {
+        accounts.push(AccountMeta::new_readonly(*council_mint_key, false));
+    }
 
     let instruction = GovernanceInstruction::CreateGovernance {
         vote_threshold,
         minimum_slot_waiting_period,
         time_limit,
-        name,
+        name: *name,
     };
 
     Ok(Instruction {
-        program_id: *program_id,
+        program_id: id(),
         accounts,
         data: instruction.pack(),
     })
 }
 
 /// Create Gov Account
-pub fn create_gov_account(program_id: &Pubkey) -> Result<Instruction, ProgramError> {
+pub fn create_dummy_account() -> Result<Instruction, ProgramError> {
     let accounts = vec![
         AccountMeta::new_readonly(system_program::id(), false),
         AccountMeta::new_readonly(bpf_loader_upgradeable::id(), false),
     ];
 
-    let instruction = GovernanceInstruction::CreateGovAccount {};
+    let instruction = GovernanceInstruction::CreateDummyAccount {};
 
     Ok(Instruction {
-        program_id: *program_id,
+        program_id: id(),
         accounts,
         data: instruction.pack(),
     })

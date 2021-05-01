@@ -121,7 +121,7 @@ pub fn process_instruction(
             process_create_empty_governance_voting_record(program_id, accounts)
         }
 
-        GovernanceInstruction::CreateGovAccount => {
+        GovernanceInstruction::CreateDummyAccount => {
             msg!("Instruction: CreateAccount");
             Ok(())
         }
