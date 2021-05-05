@@ -7,7 +7,7 @@ use solana_sdk::{
 };
 use spl_governance::{
     id,
-    instruction::{create_dummy_account, create_governance},
+    instruction::create_governance,
     processor::process_instruction,
     state::governance::{Governance, GOVERNANCE_NAME_LENGTH},
     PROGRAM_AUTHORITY_SEED,
@@ -24,35 +24,20 @@ mod program_test;
 use program_test::*;
 
 #[tokio::test]
-async fn test_governance() {
+async fn test_create_dummy_account() {
     let mut governance_test = GovernanceProgramTest::start_new().await;
 
-    governance_test
-        .with_governed_program()
-        .with_dummy_account()
-        .await
-        .with_dummy_account()
-        .await;
+    governance_test.with_dummy_account().await;
 }
 
 #[tokio::test]
-async fn test_dummy_created() {
-    let (mut banks_client, payer, recent_blockhash) = ProgramTest::new(
-        "spl_governance",
-        spl_governance::id(),
-        processor!(process_instruction),
-    )
-    .start()
-    .await;
+async fn test_created() {
+    let mut governance_test = GovernanceProgramTest::start_new().await;
 
-    let i1 = create_dummy_account().unwrap();
-
-    let mut transaction = Transaction::new_with_payer(&[i1], Some(&payer.pubkey()));
-    transaction.sign(&[&payer], recent_blockhash);
-    banks_client.process_transaction(transaction).await.unwrap();
+    governance_test.with_governed_program().await;
 }
 
-//#[tokio::test]
+#[tokio::test]
 async fn test_created_without_loader() {
     // Arrange
     let program_test = ProgramTest::new(
@@ -133,8 +118,8 @@ async fn test_created_without_loader() {
     assert_eq!(true, governance_account.council_mint.is_none());
 }
 
-//#[tokio::test]
-async fn test_created() {
+#[tokio::test]
+async fn test_created_old() {
     // Arrange
     let mut program_test = ProgramTest::new(
         "spl_governance",
