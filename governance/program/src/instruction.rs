@@ -510,30 +510,30 @@ impl GovernanceInstruction {
 
 /// Creates CreateGovernance instruction
 pub fn create_governance(
-    governance_key: &Pubkey,
-    governed_program_key: &Pubkey,
-    governed_program_data_key: &Pubkey,
-    governed_program_upgrade_authority_key: &Pubkey,
-    governance_mint_key: &Pubkey,
-    payer_key: &Pubkey,
-    council_mint_key: &Option<Pubkey>,
+    governance_address: &Pubkey,
+    governed_program_address: &Pubkey,
+    governed_program_data_address: &Pubkey,
+    governed_program_upgrade_authority: &Pubkey,
+    governance_mint: &Pubkey,
+    payer: &Pubkey,
+    council_mint: &Option<Pubkey>,
     vote_threshold: u8,
     minimum_slot_waiting_period: u64,
     time_limit: u64,
     name: &[u8; GOVERNANCE_NAME_LENGTH],
 ) -> Result<Instruction, ProgramError> {
     let mut accounts = vec![
-        AccountMeta::new(*governance_key, false),
-        AccountMeta::new_readonly(*governed_program_key, false),
-        AccountMeta::new(*governed_program_data_key, false),
-        AccountMeta::new_readonly(*governed_program_upgrade_authority_key, true),
-        AccountMeta::new_readonly(*governance_mint_key, false),
-        AccountMeta::new_readonly(*payer_key, true),
+        AccountMeta::new(*governance_address, false),
+        AccountMeta::new_readonly(*governed_program_address, false),
+        AccountMeta::new(*governed_program_data_address, false),
+        AccountMeta::new_readonly(*governed_program_upgrade_authority, true),
+        AccountMeta::new_readonly(*governance_mint, false),
+        AccountMeta::new_readonly(*payer, true),
         AccountMeta::new_readonly(system_program::id(), false),
         AccountMeta::new_readonly(bpf_loader_upgradeable::id(), false),
     ];
 
-    if let Some(council_mint_key) = council_mint_key {
+    if let Some(council_mint_key) = council_mint {
         accounts.push(AccountMeta::new_readonly(*council_mint_key, false));
     }
 
