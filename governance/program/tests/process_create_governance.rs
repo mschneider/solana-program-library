@@ -19,6 +19,22 @@ use solana_program::{
     pubkey::Pubkey,
 };
 
+mod program_test;
+
+use program_test::*;
+
+#[tokio::test]
+async fn test_governance() {
+    let mut governance_test = GovernanceProgramTest::start_new().await;
+
+    governance_test
+        .with_governed_program()
+        .with_dummy_account()
+        .await
+        .with_dummy_account()
+        .await;
+}
+
 #[tokio::test]
 async fn test_dummy_created() {
     let (mut banks_client, payer, recent_blockhash) = ProgramTest::new(
