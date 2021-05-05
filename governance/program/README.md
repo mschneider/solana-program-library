@@ -49,6 +49,7 @@ These Signers can then add commands to the set and/or sign off on the Proposal. 
 the Proposal leaves Draft mode and enters Voting mode.
 Voting mode lasts as long as the Governance has it configured to last, and during this time
 people holding Governance or Council tokens may vote on theProposal.
+Only one Proposal should be allowed into voting mode at a time.
 Once the Proposal is "tipped" it either enters the Defeated or Executing state.
 If Executed, it enters Completed only once all commands have been run.
 
@@ -72,8 +73,10 @@ Voting No does likewise with the No mint.
 There is a conservation of energy going on here where the total tokens the person possesses
 is always equivalent to their starting token amount.
 
-Once the vote completes, they may redeem their collected tokens (Yes, No, Undecided) for their starting tokens,
+At any time, they may redeem their collected tokens (Yes, No, Undecided) for their starting tokens,
 whether they be Uniswap, Sushi, or what have you, from the holding account on the Proposal.
+Most likely after the vote finishes, to transfer them into a new
+proposal. But also during a vote in order to retract or change a vote.
 
 This all happens behind the scenes.
 
