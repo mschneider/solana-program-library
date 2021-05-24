@@ -48,7 +48,7 @@
     "@solana/web3.js": "^0.87.0",
     "bn.js": "^5.0.0",
     "buffer-layout": "^1.2.0",
-    "dotenv": "8.2.0",
+    "dotenv": "10.0.0",
     "mkdirp": "1.0.4"
   },
   "devDependencies": {
