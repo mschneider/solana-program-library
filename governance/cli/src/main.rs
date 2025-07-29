@@ -24,6 +24,7 @@ use {
         collections::HashMap,
         fs::File,
         io::Write,
+        sync::{atomic::{AtomicBool, Ordering}, mpsc::channel, Arc},
         time::{Duration, SystemTime, UNIX_EPOCH},
     },
 };
@@ -160,26 +161,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let prefix_str = prefix.as_str();
 
-            loop {
-                let governance_seed = Keypair::new().pubkey();
-                let governance_address =
-                    get_governance_address(&program_id, &realm_address, &governance_seed);
-                let native_treasury_address =
-                    get_native_treasury_address(&program_id, &governance_address);
-                let base58 = if ignore_case {
-                    native_treasury_address.to_string().to_lowercase()
-                } else {
-                    native_treasury_address.to_string()
-                };
+            let num_threads: usize = std::thread::available_parallelism().unwrap().get();
+            println!("Launching {num_threads} threads..");
 
-                if base58.starts_with(prefix_str) {
-                    println!("Governance Seed: {}", governance_seed);
-                    println!("Governance Address: {}", governance_address);
-                    println!("Native Treasury: {}", native_treasury_address);
-
-                    break;
+            std::thread::scope(|s| {
+                let has_finished = Arc::new(AtomicBool::new(false));
+                let (exit_signal_sender, exit_signal_receiver) = channel();
+                for i in 0..num_threads {
+                    let has_finished = has_finished.clone();
+                    let exit_signal_sender = exit_signal_sender.clone();
+                    s.spawn(move || {
+                        loop {
+                            let governance_seed = Keypair::new().pubkey();
+                            let governance_address =
+                                get_governance_address(&program_id, &realm_address, &governance_seed);
+                            let native_treasury_address =
+                                get_native_treasury_address(&program_id, &governance_address);
+                            let base58 = if ignore_case {
+                                native_treasury_address.to_string().to_lowercase()
+                            } else {
+                                native_treasury_address.to_string()
+                            };
+                            if has_finished.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            if base58.starts_with(prefix_str) {
+                                has_finished.store(true, Ordering::Relaxed);
+                                if let Ok(()) = exit_signal_sender.send(()) {
+                                    println!("Governance Seed: {}", governance_seed);
+                                    println!("Governance Address: {}", governance_address);
+                                    println!("Native Treasury: {}", native_treasury_address);
+                                }
+                                break;
+                            }
+                        }
+                    });
                 }
-            }
+                exit_signal_receiver.recv().unwrap();
+            });
 
             Ok(())
         }
